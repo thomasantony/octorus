@@ -31,10 +31,6 @@ pub enum DataState {
         pr: PullRequest,
         files: Vec<ChangedFile>,
     },
-    CachedLoading {
-        pr: PullRequest,
-        files: Vec<ChangedFile>,
-    },
     Error(String),
 }
 
@@ -55,7 +51,7 @@ pub struct App {
 }
 
 impl App {
-    /// 即時TUI表示用コンストラクタ
+    /// Loading状態で開始（キャッシュミス時）
     pub fn new_loading(
         repo: &str,
         pr_number: u32,
@@ -71,6 +67,37 @@ impl App {
             selected_file: 0,
             selected_line: 0,
             diff_line_count: 0,
+            scroll_offset: 0,
+            pending_comment: None,
+            config,
+            should_quit: false,
+            data_receiver: Some(rx),
+            retry_sender: None,
+        };
+
+        (app, tx)
+    }
+
+    /// キャッシュデータで即座に開始（キャッシュヒット時）
+    pub fn new_with_cache(
+        repo: &str,
+        pr_number: u32,
+        config: Config,
+        pr: PullRequest,
+        files: Vec<ChangedFile>,
+    ) -> (Self, mpsc::Sender<DataLoadResult>) {
+        let (tx, rx) = mpsc::channel(2);
+
+        let diff_line_count = Self::calc_diff_line_count(&files, 0);
+
+        let app = Self {
+            repo: repo.to_string(),
+            pr_number,
+            data_state: DataState::Loaded { pr, files },
+            state: AppState::FileList,
+            selected_file: 0,
+            selected_line: 0,
+            diff_line_count,
             scroll_offset: 0,
             pending_comment: None,
             config,
@@ -120,20 +147,11 @@ impl App {
                 self.diff_line_count = Self::calc_diff_line_count(&files, self.selected_file);
                 self.data_state = DataState::Loaded { pr, files };
             }
-            DataLoadResult::CacheHit {
-                pr,
-                files,
-                checking_update,
-            } => {
-                self.diff_line_count = Self::calc_diff_line_count(&files, self.selected_file);
-                if checking_update {
-                    self.data_state = DataState::CachedLoading { pr, files };
-                } else {
-                    self.data_state = DataState::Loaded { pr, files };
-                }
-            }
             DataLoadResult::Error(msg) => {
-                self.data_state = DataState::Error(msg);
+                // Loading状態の場合のみエラー表示（既にデータがある場合は無視）
+                if matches!(self.data_state, DataState::Loading) {
+                    self.data_state = DataState::Error(msg);
+                }
             }
         }
     }
@@ -149,7 +167,6 @@ impl App {
     pub fn files(&self) -> &[ChangedFile] {
         match &self.data_state {
             DataState::Loaded { files, .. } => files,
-            DataState::CachedLoading { files, .. } => files,
             _ => &[],
         }
     }
@@ -157,17 +174,13 @@ impl App {
     pub fn pr(&self) -> Option<&PullRequest> {
         match &self.data_state {
             DataState::Loaded { pr, .. } => Some(pr),
-            DataState::CachedLoading { pr, .. } => Some(pr),
             _ => None,
         }
     }
 
     #[allow(dead_code)]
     pub fn is_data_available(&self) -> bool {
-        matches!(
-            self.data_state,
-            DataState::Loaded { .. } | DataState::CachedLoading { .. }
-        )
+        matches!(self.data_state, DataState::Loaded { .. })
     }
 
     async fn handle_input(

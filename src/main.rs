@@ -37,27 +37,60 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     let config = config::Config::load()?;
 
-    // TUI即時表示用のApp作成
-    let (mut app, tx) = app::App::new_loading(&args.repo, args.pr, config);
-
     // リトライ用のチャンネル
     let (retry_tx, mut retry_rx) = mpsc::channel::<()>(1);
+
+    // キャッシュを同期的に読み込み（メインスレッドで即座に）
+    let (mut app, tx, needs_fetch) = if args.refresh {
+        // --refresh: キャッシュ無視、API取得が必要
+        let (app, tx) = app::App::new_loading(&args.repo, args.pr, config);
+        (app, tx, loader::FetchMode::Fresh)
+    } else {
+        match cache::read_cache(&args.repo, args.pr, args.cache_ttl) {
+            Ok(cache::CacheResult::Hit(entry)) => {
+                // キャッシュヒット: 即座にデータをセット
+                let (app, tx) = app::App::new_with_cache(
+                    &args.repo,
+                    args.pr,
+                    config,
+                    entry.pr.clone(),
+                    entry.files.clone(),
+                );
+                (app, tx, loader::FetchMode::CheckUpdate(entry.pr_updated_at))
+            }
+            Ok(cache::CacheResult::Stale(entry)) => {
+                // TTL切れ: 一旦データ表示、バックグラウンドで更新
+                let (app, tx) = app::App::new_with_cache(
+                    &args.repo,
+                    args.pr,
+                    config,
+                    entry.pr.clone(),
+                    entry.files.clone(),
+                );
+                (app, tx, loader::FetchMode::Fresh)
+            }
+            Ok(cache::CacheResult::Miss) | Err(_) => {
+                // キャッシュなし: Loading状態で開始
+                let (app, tx) = app::App::new_loading(&args.repo, args.pr, config);
+                (app, tx, loader::FetchMode::Fresh)
+            }
+        }
+    };
+
     app.set_retry_sender(retry_tx);
 
-    // バックグラウンドでデータロード開始
+    // バックグラウンドでAPI取得
     let repo = args.repo.clone();
     let pr_number = args.pr;
-    let refresh = args.refresh;
-    let cache_ttl = args.cache_ttl;
 
-    let tx_clone = tx.clone();
     tokio::spawn(async move {
-        loader::load_pr_data(repo.clone(), pr_number, refresh, cache_ttl, tx_clone).await;
+        loader::fetch_pr_data(repo.clone(), pr_number, needs_fetch, tx.clone()).await;
 
         // リトライ要求を待機
         while retry_rx.recv().await.is_some() {
             let tx_retry = tx.clone();
-            loader::load_pr_data(repo.clone(), pr_number, true, cache_ttl, tx_retry).await;
+            loader::fetch_pr_data(repo.clone(), pr_number, loader::FetchMode::Fresh, tx_retry)
+                .await;
         }
     });
 

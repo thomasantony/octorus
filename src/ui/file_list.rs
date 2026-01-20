@@ -20,12 +20,6 @@ pub fn render(frame: &mut Frame, app: &App) {
 
     // Header
     let pr_info = match &app.data_state {
-        DataState::CachedLoading { pr, .. } => {
-            format!(
-                "PR #{}: {} by @{} (Checking...)",
-                pr.number, pr.title, pr.user.login
-            )
-        }
         DataState::Loaded { pr, .. } => {
             format!("PR #{}: {} by @{}", pr.number, pr.title, pr.user.login)
         }
