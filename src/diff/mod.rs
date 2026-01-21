@@ -1,9 +1,10 @@
-//! Patch parsing utilities for extracting line information from Git diff patches.
+//! Diff utilities for parsing and rendering Git diff patches.
 //!
-//! This module provides functions to analyze patch content and extract:
-//! - Line content without diff prefixes (+/-)
-//! - Line type classification (Added, Removed, Context, Header)
-//! - New file line numbers for suggestion positioning
+//! This module provides:
+//! - Patch parsing to extract line information (type, content, line numbers)
+//! - External renderer integration (delta, diff-so-fancy, etc.)
+
+pub mod renderer;
 
 /// Represents the type of a line in a diff patch
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
