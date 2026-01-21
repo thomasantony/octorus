@@ -5,6 +5,7 @@ use std::io::Stdout;
 use tokio::sync::mpsc;
 
 use crate::config::Config;
+use crate::github::comment::ReviewComment;
 use crate::github::{self, ChangedFile, PullRequest};
 use crate::loader::DataLoadResult;
 use crate::ui;
@@ -15,6 +16,7 @@ pub enum AppState {
     DiffView,
     CommentPreview,
     SuggestionPreview,
+    CommentList,
     Help,
 }
 
@@ -42,7 +44,7 @@ pub struct CommentData {
 pub enum DataState {
     Loading,
     Loaded {
-        pr: PullRequest,
+        pr: Box<PullRequest>,
         files: Vec<ChangedFile>,
     },
     Error(String),
@@ -61,8 +63,13 @@ pub struct App {
     pub pending_suggestion: Option<SuggestionData>,
     pub config: Config,
     pub should_quit: bool,
+    pub review_comments: Option<Vec<ReviewComment>>,
+    pub selected_comment: usize,
+    pub comment_list_scroll_offset: usize,
+    pub comments_loading: bool,
     data_receiver: Option<mpsc::Receiver<DataLoadResult>>,
     retry_sender: Option<mpsc::Sender<()>>,
+    comment_receiver: Option<mpsc::Receiver<Vec<ReviewComment>>>,
 }
 
 impl App {
@@ -87,8 +94,13 @@ impl App {
             pending_suggestion: None,
             config,
             should_quit: false,
+            review_comments: None,
+            selected_comment: 0,
+            comment_list_scroll_offset: 0,
+            comments_loading: false,
             data_receiver: Some(rx),
             retry_sender: None,
+            comment_receiver: None,
         };
 
         (app, tx)
@@ -109,7 +121,7 @@ impl App {
         let app = Self {
             repo: repo.to_string(),
             pr_number,
-            data_state: DataState::Loaded { pr, files },
+            data_state: DataState::Loaded { pr: Box::new(pr), files },
             state: AppState::FileList,
             selected_file: 0,
             selected_line: 0,
@@ -119,8 +131,13 @@ impl App {
             pending_suggestion: None,
             config,
             should_quit: false,
+            review_comments: None,
+            selected_comment: 0,
+            comment_list_scroll_offset: 0,
+            comments_loading: false,
             data_receiver: Some(rx),
             retry_sender: None,
+            comment_receiver: None,
         };
 
         (app, tx)
@@ -135,6 +152,7 @@ impl App {
 
         while !self.should_quit {
             self.poll_data_updates();
+            self.poll_comment_updates();
             terminal.draw(|frame| ui::render(frame, self))?;
             self.handle_input(&mut terminal).await?;
         }
@@ -154,6 +172,29 @@ impl App {
             Err(mpsc::error::TryRecvError::Empty) => {}
             Err(mpsc::error::TryRecvError::Disconnected) => {
                 self.data_receiver = None;
+            }
+        }
+    }
+
+    /// コメント取得のポーリング
+    fn poll_comment_updates(&mut self) {
+        let Some(ref mut rx) = self.comment_receiver else {
+            return;
+        };
+
+        match rx.try_recv() {
+            Ok(comments) => {
+                self.review_comments = Some(comments);
+                self.selected_comment = 0;
+                self.comment_list_scroll_offset = 0;
+                self.comments_loading = false;
+                self.comment_receiver = None;
+            }
+            Err(mpsc::error::TryRecvError::Empty) => {}
+            Err(mpsc::error::TryRecvError::Disconnected) => {
+                self.review_comments = Some(vec![]);
+                self.comments_loading = false;
+                self.comment_receiver = None;
             }
         }
     }
@@ -190,7 +231,7 @@ impl App {
 
     pub fn pr(&self) -> Option<&PullRequest> {
         match &self.data_state {
-            DataState::Loaded { pr, .. } => Some(pr),
+            DataState::Loaded { pr, .. } => Some(pr.as_ref()),
             _ => None,
         }
     }
@@ -231,6 +272,7 @@ impl App {
                     AppState::SuggestionPreview => {
                         self.handle_suggestion_preview_input(key).await?
                     }
+                    AppState::CommentList => self.handle_comment_list_input(key, terminal).await?,
                     AppState::Help => self.handle_help_input(key)?,
                 }
             }
@@ -279,6 +321,7 @@ impl App {
             KeyCode::Char(c) if c == self.config.keybindings.comment => {
                 self.submit_review(ReviewAction::Comment, terminal).await?
             }
+            KeyCode::Char('C') => self.open_comment_list(),
             KeyCode::Char('?') => self.state = AppState::Help,
             _ => {}
         }
@@ -531,5 +574,167 @@ impl App {
             _ => {}
         }
         Ok(())
+    }
+
+    fn open_comment_list(&mut self) {
+        self.state = AppState::CommentList;
+
+        // Try cache first
+        let cache_result = crate::cache::read_comment_cache(
+            &self.repo,
+            self.pr_number,
+            crate::cache::DEFAULT_TTL_SECS,
+        );
+
+        match cache_result {
+            Ok(crate::cache::CacheResult::Hit(entry)) => {
+                // Cache hit (fresh) - show immediately, no background fetch needed
+                self.review_comments = Some(entry.comments);
+                self.selected_comment = 0;
+                self.comment_list_scroll_offset = 0;
+                self.comments_loading = false;
+                return;
+            }
+            Ok(crate::cache::CacheResult::Stale(entry)) => {
+                // Stale cache - show immediately, fetch in background for next time
+                self.review_comments = Some(entry.comments);
+                self.selected_comment = 0;
+                self.comment_list_scroll_offset = 0;
+                self.comments_loading = false;
+            }
+            _ => {
+                // No cache - show loading
+                self.comments_loading = true;
+            }
+        };
+
+        // Start background fetch (for stale cache update or fresh fetch)
+        let (tx, rx) = mpsc::channel(1);
+        self.comment_receiver = Some(rx);
+
+        let repo = self.repo.clone();
+        let pr_number = self.pr_number;
+
+        tokio::spawn(async move {
+            let comments = github::comment::fetch_review_comments(&repo, pr_number)
+                .await
+                .unwrap_or_default();
+            // Write to cache
+            let _ = crate::cache::write_comment_cache(&repo, pr_number, &comments);
+            let _ = tx.send(comments).await;
+        });
+    }
+
+    async fn handle_comment_list_input(
+        &mut self,
+        key: event::KeyEvent,
+        terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    ) -> Result<()> {
+        let visible_lines = terminal.size()?.height.saturating_sub(8) as usize;
+
+        match key.code {
+            KeyCode::Char('q') | KeyCode::Esc => {
+                self.state = AppState::FileList;
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                if let Some(ref comments) = self.review_comments {
+                    if !comments.is_empty() {
+                        self.selected_comment =
+                            (self.selected_comment + 1).min(comments.len().saturating_sub(1));
+                        self.adjust_comment_scroll(visible_lines);
+                    }
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.selected_comment = self.selected_comment.saturating_sub(1);
+                self.adjust_comment_scroll(visible_lines);
+            }
+            KeyCode::Enter => {
+                self.jump_to_comment();
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn adjust_comment_scroll(&mut self, visible_lines: usize) {
+        if visible_lines == 0 {
+            return;
+        }
+        if self.selected_comment < self.comment_list_scroll_offset {
+            self.comment_list_scroll_offset = self.selected_comment;
+        }
+        if self.selected_comment >= self.comment_list_scroll_offset + visible_lines {
+            self.comment_list_scroll_offset = self.selected_comment.saturating_sub(visible_lines) + 1;
+        }
+    }
+
+    fn jump_to_comment(&mut self) {
+        let Some(ref comments) = self.review_comments else {
+            return;
+        };
+        let Some(comment) = comments.get(self.selected_comment) else {
+            return;
+        };
+
+        let target_path = &comment.path;
+        let target_line = comment.line;
+
+        // Find file index by path
+        let file_index = self
+            .files()
+            .iter()
+            .position(|f| &f.filename == target_path);
+
+        if let Some(idx) = file_index {
+            self.selected_file = idx;
+            self.state = AppState::DiffView;
+            self.selected_line = 0;
+            self.scroll_offset = 0;
+            self.update_diff_line_count();
+
+            // Try to scroll to the target line in the diff
+            if let Some(line_num) = target_line {
+                if let Some(file) = self.files().get(idx) {
+                    if let Some(patch) = file.patch.as_ref() {
+                        if let Some(diff_line_index) = self.find_diff_line_for_new_line(patch, line_num) {
+                            self.selected_line = diff_line_index;
+                            // Center the line in view
+                            self.scroll_offset = diff_line_index.saturating_sub(10);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn find_diff_line_for_new_line(&self, patch: &str, target_line: u32) -> Option<usize> {
+        let lines: Vec<&str> = patch.lines().collect();
+        let mut new_line_number: Option<u32> = None;
+
+        for (i, line) in lines.iter().enumerate() {
+            if line.starts_with("@@") {
+                // Parse hunk header to get starting line number
+                if let Some(plus_pos) = line.find('+') {
+                    let after_plus = &line[plus_pos + 1..];
+                    let end_pos = after_plus
+                        .find([',', ' '])
+                        .unwrap_or(after_plus.len());
+                    if let Ok(num) = after_plus[..end_pos].parse::<u32>() {
+                        new_line_number = Some(num);
+                    }
+                }
+            } else if line.starts_with('+') || line.starts_with(' ') {
+                if let Some(current) = new_line_number {
+                    if current == target_line {
+                        return Some(i);
+                    }
+                    new_line_number = Some(current + 1);
+                }
+            }
+            // Removed lines don't increment new_line_number
+        }
+
+        None
     }
 }
