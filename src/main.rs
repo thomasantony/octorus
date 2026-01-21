@@ -11,7 +11,7 @@ mod loader;
 mod ui;
 
 #[derive(Parser, Debug)]
-#[command(name = "hxpr")]
+#[command(name = "or")]
 #[command(about = "TUI for GitHub PR review, designed for Helix editor users")]
 #[command(version)]
 struct Args {

@@ -27,7 +27,7 @@ pub fn render(frame: &mut Frame, app: &App) {
     };
 
     let header =
-        Paragraph::new(pr_info).block(Block::default().borders(Borders::ALL).title("hxpr"));
+        Paragraph::new(pr_info).block(Block::default().borders(Borders::ALL).title("octorus"));
     frame.render_widget(header, chunks[0]);
 
     // File list
@@ -102,7 +102,7 @@ pub fn render_loading(frame: &mut Frame, app: &App) {
 
     // Header
     let header = Paragraph::new(format!("PR #{} - Loading...", app.pr_number))
-        .block(Block::default().borders(Borders::ALL).title("hxpr"));
+        .block(Block::default().borders(Borders::ALL).title("octorus"));
     frame.render_widget(header, chunks[0]);
 
     // Loading message
@@ -135,7 +135,7 @@ pub fn render_error(frame: &mut Frame, app: &App, error_msg: &str) {
 
     // Header
     let header = Paragraph::new(format!("PR #{} - Error", app.pr_number))
-        .block(Block::default().borders(Borders::ALL).title("hxpr"));
+        .block(Block::default().borders(Borders::ALL).title("octorus"));
     frame.render_widget(header, chunks[0]);
 
     // Error message

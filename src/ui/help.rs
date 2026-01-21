@@ -18,7 +18,7 @@ pub fn render(frame: &mut Frame, _app: &App) {
         .split(frame.area());
 
     // Title
-    let title = Paragraph::new("hxpr - GitHub PR Review TUI")
+    let title = Paragraph::new("octorus - GitHub PR Review TUI")
         .style(
             Style::default()
                 .fg(Color::Cyan)

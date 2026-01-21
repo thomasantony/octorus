@@ -22,14 +22,14 @@ pub enum CacheResult {
     Miss,
 }
 
-/// キャッシュディレクトリ: ~/.cache/hxpr/
+/// キャッシュディレクトリ: ~/.cache/octorus/
 pub fn cache_dir() -> PathBuf {
     dirs::cache_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("hxpr")
+        .join("octorus")
 }
 
-/// キャッシュファイルパス: ~/.cache/hxpr/{owner}_{repo}_{pr}.json
+/// キャッシュファイルパス: ~/.cache/octorus/{owner}_{repo}_{pr}.json
 pub fn cache_file_path(repo: &str, pr_number: u32) -> PathBuf {
     let sanitized = repo.replace('/', "_");
     cache_dir().join(format!("{}_{}.json", sanitized, pr_number))

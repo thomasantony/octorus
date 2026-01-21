@@ -8,7 +8,7 @@ use tempfile::NamedTempFile;
 pub fn open_comment_editor(editor: &str, filename: &str, line: usize) -> Result<Option<String>> {
     let temp_file = NamedTempFile::new()?;
     let template = format!(
-        "<!-- hxpr: Enter your comment below -->\n\
+        "<!-- octorus: Enter your comment below -->\n\
          <!-- File: {} Line: {} -->\n\
          <!-- Save and close to submit, delete all content to cancel -->\n\n",
         filename, line

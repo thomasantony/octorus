@@ -1,4 +1,4 @@
-# hxpr
+# octorus
 
 A TUI tool for GitHub PR review, designed for Helix editor users.
 
@@ -18,22 +18,22 @@ A TUI tool for GitHub PR review, designed for Helix editor users.
 ## Installation
 
 ```bash
-cargo install --path .
+cargo install octorus
 ```
 
 Or build from source:
 
 ```bash
-git clone https://github.com/ushironoko/hxpr.git
-cd hxpr
+git clone https://github.com/ushironoko/octorus.git
+cd octorus
 cargo build --release
-cp target/release/hxpr ~/.local/bin/
+cp target/release/or ~/.local/bin/
 ```
 
 ## Usage
 
 ```bash
-hxpr --repo owner/repo --pr 123
+or --repo owner/repo --pr 123
 ```
 
 ### Keybindings
@@ -64,7 +64,7 @@ hxpr --repo owner/repo --pr 123
 
 ## Configuration
 
-Create `~/.config/hxpr/config.toml`:
+Create `~/.config/octorus/config.toml`:
 
 ```toml
 # Editor to use for writing comments

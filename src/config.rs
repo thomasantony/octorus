@@ -72,7 +72,7 @@ impl Config {
     fn config_path() -> PathBuf {
         dirs::config_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join("hxpr")
+            .join("octorus")
             .join("config.toml")
     }
 }
