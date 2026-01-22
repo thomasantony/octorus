@@ -8,7 +8,7 @@ use ratatui::{
 
 use crate::app::App;
 use crate::config::DiffConfig;
-use crate::diff::renderer::{render_with_external, RenderResult};
+use crate::diff::renderer::render_with_external;
 
 pub fn render(frame: &mut Frame, app: &App) {
     let chunks = Layout::default()
@@ -64,7 +64,7 @@ fn render_diff_content(frame: &mut Frame, app: &App, area: ratatui::layout::Rect
         .and_then(|file| file.patch.as_ref());
 
     let text: Text = match patch {
-        Some(patch) => render_patch(patch, app.selected_line, &app.config.diff),
+        Some(patch) => render_patch(patch, app.selected_line, &app.config.diff, app.renderer_available),
         None => Text::from("No diff available"),
     };
 
@@ -77,19 +77,18 @@ fn render_diff_content(frame: &mut Frame, app: &App, area: ratatui::layout::Rect
 }
 
 /// Render a patch using external renderer or fallback to builtin.
-fn render_patch<'a>(patch: &str, selected_line: usize, config: &DiffConfig) -> Text<'a> {
-    // Try external renderer first
-    match render_with_external(patch, config) {
-        RenderResult::Rendered(text) => {
+fn render_patch<'a>(patch: &str, selected_line: usize, config: &DiffConfig, renderer_available: bool) -> Text<'a> {
+    // Use external renderer only if available (checked at startup)
+    if renderer_available {
+        if let Some(text) = render_with_external(patch, config) {
             // External renderer succeeded - add line selection highlight
-            highlight_selected_line(text, selected_line)
-        }
-        RenderResult::Fallback => {
-            // Use builtin renderer
-            let lines = parse_patch_to_lines(patch, selected_line);
-            Text::from(lines)
+            return highlight_selected_line(text, selected_line);
         }
     }
+
+    // Use builtin renderer
+    let lines = parse_patch_to_lines(patch, selected_line);
+    Text::from(lines)
 }
 
 /// Add selection highlight to a specific line in the rendered text.

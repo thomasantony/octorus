@@ -10,22 +10,17 @@ use std::process::{Command, Stdio};
 
 use crate::config::DiffConfig;
 
-/// Result of rendering a diff patch
-pub enum RenderResult<'a> {
-    /// Successfully rendered with external renderer
-    Rendered(Text<'a>),
-    /// External renderer not available, use fallback
-    Fallback,
-}
-
 /// Render a patch using the configured external renderer.
 ///
-/// Returns `RenderResult::Rendered` if the external renderer succeeds,
-/// or `RenderResult::Fallback` if the renderer is not available or fails.
-pub fn render_with_external<'a>(patch: &str, config: &DiffConfig) -> RenderResult<'a> {
+/// Returns `Some(Text)` if the external renderer succeeds,
+/// or `None` if the renderer fails during execution.
+///
+/// Note: Call `is_renderer_available` at startup to check availability,
+/// rather than calling this function repeatedly which spawns processes.
+pub fn render_with_external<'a>(patch: &str, config: &DiffConfig) -> Option<Text<'a>> {
     // "builtin" means use the internal renderer
     if config.renderer == "builtin" || config.renderer.is_empty() {
-        return RenderResult::Fallback;
+        return None;
     }
 
     // Build command with renderer-specific arguments
@@ -44,17 +39,14 @@ pub fn render_with_external<'a>(patch: &str, config: &DiffConfig) -> RenderResul
 
             match child.wait_with_output() {
                 Ok(output) if output.status.success() => output.stdout,
-                _ => return RenderResult::Fallback,
+                _ => return None,
             }
         }
-        Err(_) => return RenderResult::Fallback,
+        Err(_) => return None,
     };
 
     // Convert ANSI output to ratatui Text
-    match output.into_text() {
-        Ok(text) => RenderResult::Rendered(text),
-        Err(_) => RenderResult::Fallback,
-    }
+    output.into_text().ok()
 }
 
 /// Build a Command for the specified renderer with appropriate arguments.
@@ -89,7 +81,9 @@ fn build_renderer_command(renderer: &str, config: &DiffConfig) -> Command {
 }
 
 /// Check if an external renderer is available on the system.
-#[allow(dead_code)]
+///
+/// This should be called once at startup and the result cached,
+/// to avoid spawning processes on every render frame.
 pub fn is_renderer_available(renderer: &str) -> bool {
     if renderer == "builtin" || renderer.is_empty() {
         return true;

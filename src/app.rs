@@ -5,6 +5,7 @@ use std::io::Stdout;
 use tokio::sync::mpsc;
 
 use crate::config::Config;
+use crate::diff::renderer::is_renderer_available;
 use crate::github::comment::ReviewComment;
 use crate::github::{self, ChangedFile, PullRequest};
 use crate::loader::DataLoadResult;
@@ -67,6 +68,8 @@ pub struct App {
     pub selected_comment: usize,
     pub comment_list_scroll_offset: usize,
     pub comments_loading: bool,
+    /// Cached result of external renderer availability check (checked at startup)
+    pub renderer_available: bool,
     data_receiver: Option<mpsc::Receiver<DataLoadResult>>,
     retry_sender: Option<mpsc::Sender<()>>,
     comment_receiver: Option<mpsc::Receiver<Result<Vec<ReviewComment>, String>>>,
@@ -80,6 +83,7 @@ impl App {
         config: Config,
     ) -> (Self, mpsc::Sender<DataLoadResult>) {
         let (tx, rx) = mpsc::channel(2);
+        let renderer_available = is_renderer_available(&config.diff.renderer);
 
         let app = Self {
             repo: repo.to_string(),
@@ -98,6 +102,7 @@ impl App {
             selected_comment: 0,
             comment_list_scroll_offset: 0,
             comments_loading: false,
+            renderer_available,
             data_receiver: Some(rx),
             retry_sender: None,
             comment_receiver: None,
@@ -115,7 +120,7 @@ impl App {
         files: Vec<ChangedFile>,
     ) -> (Self, mpsc::Sender<DataLoadResult>) {
         let (tx, rx) = mpsc::channel(2);
-
+        let renderer_available = is_renderer_available(&config.diff.renderer);
         let diff_line_count = Self::calc_diff_line_count(&files, 0);
 
         let app = Self {
@@ -135,6 +140,7 @@ impl App {
             selected_comment: 0,
             comment_list_scroll_offset: 0,
             comments_loading: false,
+            renderer_available,
             data_receiver: Some(rx),
             retry_sender: None,
             comment_receiver: None,
