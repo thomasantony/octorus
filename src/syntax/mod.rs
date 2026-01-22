@@ -142,9 +142,9 @@ pub fn highlight_code_line(code: &str, highlighter: &mut HighlightLines<'_>) -> 
                 Span::styled(text.to_string(), convert_syntect_style(&style))
             })
             .collect(),
-        Err(e) => {
+        Err(_e) => {
             #[cfg(debug_assertions)]
-            eprintln!("Highlight error: {e:?}");
+            eprintln!("Highlight error: {_e:?}");
             vec![Span::raw(code.to_string())]
         }
     }
