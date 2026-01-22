@@ -17,6 +17,7 @@ pub struct DiffConfig {
     pub renderer: String,
     pub side_by_side: bool,
     pub line_numbers: bool,
+    pub theme: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,6 +45,7 @@ impl Default for DiffConfig {
             renderer: "delta".to_owned(),
             side_by_side: true,
             line_numbers: true,
+            theme: "base16-ocean.dark".to_owned(),
         }
     }
 }

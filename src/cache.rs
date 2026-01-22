@@ -106,7 +106,11 @@ pub fn comment_cache_file_path(repo: &str, pr_number: u32) -> PathBuf {
 }
 
 /// コメントキャッシュ読み込み
-pub fn read_comment_cache(repo: &str, pr_number: u32, ttl_secs: u64) -> Result<CacheResult<CommentCacheEntry>> {
+pub fn read_comment_cache(
+    repo: &str,
+    pr_number: u32,
+    ttl_secs: u64,
+) -> Result<CacheResult<CommentCacheEntry>> {
     let path = comment_cache_file_path(repo, pr_number);
     if !path.exists() {
         return Ok(CacheResult::Miss);
