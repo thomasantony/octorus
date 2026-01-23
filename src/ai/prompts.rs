@@ -203,6 +203,11 @@ List all files you modified in the "files_modified" array."#,
 }
 
 /// Truncate a string to a maximum length (UTF-8 safe)
+///
+/// Note: Similar truncation functions exist in `src/ai/adapters/claude.rs` (`summarize_text`)
+/// for tool result display. These are kept separate intentionally as they have slightly
+/// different purposes (prompt truncation vs. display summarization) and may evolve
+/// independently. Consider consolidating into a shared utility if more uses emerge.
 fn truncate(s: &str, max_len: usize) -> String {
     let s = s.trim();
     let char_count = s.chars().count();

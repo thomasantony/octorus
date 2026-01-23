@@ -433,17 +433,15 @@ impl Orchestrator {
             ReviewAction::Comment => crate::app::ReviewAction::Comment,
         };
 
+        // Copy for potential fallback use (app_action is moved into submit_review)
+        let app_action_for_fallback = app_action;
+
         // Post summary comment using gh pr review
         // If approve fails (e.g., can't approve own PR), fall back to comment
-        let result = github::submit_review(
-            &self.repo,
-            self.pr_number,
-            app_action,
-            &review.summary,
-        )
-        .await;
+        let result =
+            github::submit_review(&self.repo, self.pr_number, app_action, &review.summary).await;
 
-        if result.is_err() && matches!(app_action, crate::app::ReviewAction::Approve) {
+        if result.is_err() && matches!(app_action_for_fallback, crate::app::ReviewAction::Approve) {
             warn!("Approve failed, falling back to comment");
             github::submit_review(
                 &self.repo,
@@ -517,7 +515,11 @@ impl Orchestrator {
         comments
     }
 
-    /// Update head_sha from PR (after reviewee pushes)
+    /// Update head_sha from PR
+    ///
+    /// Note: The reviewee does NOT push changes; commits are local only.
+    /// This update is for when the user manually pushes between iterations,
+    /// or when external tools/CI update the PR branch.
     async fn update_head_sha(&mut self) -> Result<()> {
         let pr = github::fetch_pr(&self.repo, self.pr_number).await?;
         if let Some(ref mut ctx) = self.context {
