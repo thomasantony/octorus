@@ -3,6 +3,7 @@ use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io::Stdout;
 use tokio::sync::mpsc;
+use tokio::task::AbortHandle;
 
 use crate::ai::orchestrator::RallyEvent;
 use crate::ai::{Context, Orchestrator, RallyState};
@@ -138,6 +139,8 @@ pub struct App {
     comment_receiver: Option<mpsc::Receiver<Result<Vec<ReviewComment>, String>>>,
     discussion_comment_receiver: Option<mpsc::Receiver<Result<Vec<DiscussionComment>, String>>>,
     rally_event_receiver: Option<mpsc::Receiver<RallyEvent>>,
+    // Handle for aborting the rally orchestrator task
+    rally_abort_handle: Option<AbortHandle>,
 }
 
 impl App {
@@ -179,6 +182,7 @@ impl App {
             comment_receiver: None,
             discussion_comment_receiver: None,
             rally_event_receiver: None,
+            rally_abort_handle: None,
         };
 
         (app, tx)
@@ -228,6 +232,7 @@ impl App {
             comment_receiver: None,
             discussion_comment_receiver: None,
             rally_event_receiver: None,
+            rally_abort_handle: None,
         };
 
         (app, tx)
@@ -560,6 +565,10 @@ impl App {
     fn handle_ai_rally_input(&mut self, key: event::KeyEvent) -> Result<()> {
         match key.code {
             KeyCode::Char('q') => {
+                // Abort the orchestrator task if running
+                if let Some(handle) = self.rally_abort_handle.take() {
+                    handle.abort();
+                }
                 // Abort rally and return to file list
                 self.ai_rally_state = None;
                 self.rally_event_receiver = None;
@@ -597,6 +606,23 @@ impl App {
                         self.ai_rally_state = None;
                         self.rally_event_receiver = None;
                         self.state = AppState::FileList;
+                    }
+                }
+            }
+            KeyCode::Char('r') => {
+                // Retry on error state
+                if let Some(ref state) = self.ai_rally_state {
+                    if state.state == RallyState::Error {
+                        // Abort current handle if any
+                        if let Some(handle) = self.rally_abort_handle.take() {
+                            handle.abort();
+                        }
+                        // Clear state and restart
+                        self.ai_rally_state = None;
+                        self.rally_event_receiver = None;
+                        self.state = AppState::FileList;
+                        // Restart the rally
+                        self.start_ai_rally();
                     }
                 }
             }
@@ -662,6 +688,8 @@ impl App {
             pr_body: pr.body.clone(),
             diff,
             working_dir: self.working_dir.clone(),
+            head_sha: pr.head.sha.clone(),
+            external_comments: Vec::new(),
         };
 
         let (event_tx, event_rx) = mpsc::channel(100);
@@ -679,12 +707,12 @@ impl App {
 
         self.state = AppState::AiRally;
 
-        // Spawn the orchestrator
+        // Spawn the orchestrator and store the abort handle
         let config = self.config.ai.clone();
         let repo = self.repo.clone();
         let pr_number = self.pr_number;
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let orchestrator_result = Orchestrator::new(&repo, pr_number, config, event_tx.clone());
             match orchestrator_result {
                 Ok(mut orchestrator) => {
@@ -702,6 +730,9 @@ impl App {
                 }
             }
         });
+
+        // Store the abort handle so we can cancel the task when user presses 'q'
+        self.rally_abort_handle = Some(handle.abort_handle());
     }
 
     fn refresh_all(&mut self) {

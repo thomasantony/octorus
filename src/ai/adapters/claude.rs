@@ -293,16 +293,20 @@ impl AgentAdapter for ClaudeAdapter {
     }
 
     async fn run_reviewee(&mut self, prompt: &str, context: &Context) -> Result<RevieweeOutput> {
-        // Reviewee tools: file editing and safe build/test commands
+        // Reviewee tools: file editing, safe build/test commands (NO git push)
         // Explicitly list safe subcommands to prevent dangerous operations like:
+        // - git push (not allowed - changes are committed locally only)
         // - git push --force, git reset --hard
         // - git checkout -- . (discards all changes)
         // - git restore . (discards all changes)
         // - npm publish, pnpm publish, bun publish
         // - cargo publish
+        //
+        // Note: git push is NOT allowed. The reviewee only makes local commits.
+        // Pushing is done manually by the user after reviewing the changes.
         let allowed_tools = concat!(
             "Read,Edit,Write,Glob,Grep,",
-            // Git: safe local operations only (no push, no destructive operations)
+            // Git: local operations only (no push, no destructive operations)
             // Note: git checkout and git restore are excluded because they can discard changes
             // (e.g., "git checkout -- ." or "git restore ."). Use git switch for branch operations.
             "Bash(git status:*),Bash(git diff:*),Bash(git add:*),Bash(git commit:*),",

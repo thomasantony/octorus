@@ -3,11 +3,15 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
+use tracing::warn;
 
 use crate::config::AiConfig;
+use crate::github;
+use crate::github::comment::{fetch_discussion_comments, fetch_review_comments};
 
 use super::adapter::{
-    AgentAdapter, Context, ReviewAction, RevieweeOutput, RevieweeStatus, ReviewerOutput,
+    AgentAdapter, Context, ExternalComment, ReviewAction, RevieweeOutput, RevieweeStatus,
+    ReviewerOutput,
 };
 use super::adapters::create_adapter;
 use super::prompts::{
@@ -15,6 +19,13 @@ use super::prompts::{
     build_reviewee_prompt, build_reviewer_prompt,
 };
 use super::session::{write_history_entry, write_session, HistoryEntryType, RallySession};
+
+/// Bot suffixes to identify bot users
+const BOT_SUFFIXES: &[&str] = &["[bot]"];
+/// Exact bot user names
+const BOT_EXACT_MATCHES: &[&str] = &["github-actions", "dependabot"];
+/// Maximum number of external comments to include in context
+const MAX_EXTERNAL_COMMENTS: usize = 20;
 
 /// Rally state
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -128,6 +139,13 @@ impl Orchestrator {
             self.send_event(RallyEvent::Log(format!("Starting iteration {}", iteration)))
                 .await;
 
+            // Update head_sha at start of each iteration (may have changed after push)
+            if iteration > 1 {
+                if let Err(e) = self.update_head_sha().await {
+                    warn!("Failed to update head_sha: {}", e);
+                }
+            }
+
             // Run reviewer
             self.session.update_state(RallyState::ReviewerReviewing);
             self.send_event(RallyEvent::StateChanged(RallyState::ReviewerReviewing))
@@ -147,6 +165,16 @@ impl Orchestrator {
             self.send_event(RallyEvent::ReviewCompleted(review_result.clone()))
                 .await;
             self.last_review = Some(review_result.clone());
+
+            // Post review to PR
+            if let Err(e) = self.post_review_to_pr(&review_result).await {
+                warn!("Failed to post review to PR: {}", e);
+                self.send_event(RallyEvent::Log(format!(
+                    "Warning: Failed to post review to PR: {}",
+                    e
+                )))
+                .await;
+            }
 
             // Check for approval
             if review_result.action == ReviewAction::Approve {
@@ -169,6 +197,26 @@ impl Orchestrator {
             self.send_event(RallyEvent::StateChanged(RallyState::RevieweeFix))
                 .await;
             write_session(&self.session)?;
+
+            // Fetch external comments before reviewee starts
+            let external_comments = self.fetch_external_comments().await;
+            if !external_comments.is_empty() {
+                self.send_event(RallyEvent::Log(format!(
+                    "Fetched {} external bot comments",
+                    external_comments.len()
+                )))
+                .await;
+            }
+            if let Some(ref mut ctx) = self.context {
+                ctx.external_comments = external_comments;
+            }
+
+            // Get updated context with external comments
+            let context = self
+                .context
+                .as_ref()
+                .ok_or_else(|| anyhow!("Context not set"))?
+                .clone();
 
             let fix_result = self
                 .run_reviewee_with_timeout(&context, &review_result, iteration)
@@ -300,7 +348,12 @@ impl Orchestrator {
         let prompt = if iteration == 1 {
             build_reviewer_prompt(context, iteration, custom_prompt)
         } else {
-            // Re-review after fixes - use the fix result summary and files modified
+            // Re-review after fixes - fetch updated diff and include fix summary
+            let updated_diff = self.fetch_current_diff().await.unwrap_or_else(|e| {
+                warn!("Failed to fetch updated diff: {}", e);
+                context.diff.clone()
+            });
+
             let changes_summary = self
                 .last_fix
                 .as_ref()
@@ -313,7 +366,7 @@ impl Orchestrator {
                     format!("{}\n\nFiles modified: {}", f.summary, files)
                 })
                 .unwrap_or_else(|| "No changes recorded".to_string());
-            build_rereview_prompt(context, iteration, &changes_summary)
+            build_rereview_prompt(context, iteration, &changes_summary, &updated_diff)
         };
 
         let duration = Duration::from_secs(self.config.timeout_secs);
@@ -358,8 +411,127 @@ impl Orchestrator {
         let _ = self.event_sender.send(event).await;
     }
 
+    /// Post review to PR (summary comment + inline comments)
+    async fn post_review_to_pr(&self, review: &ReviewerOutput) -> Result<()> {
+        let context = self
+            .context
+            .as_ref()
+            .ok_or_else(|| anyhow!("Context not set"))?;
+
+        // Map AI ReviewAction to App ReviewAction
+        let app_action = match review.action {
+            ReviewAction::Approve => crate::app::ReviewAction::Approve,
+            ReviewAction::RequestChanges => crate::app::ReviewAction::RequestChanges,
+            ReviewAction::Comment => crate::app::ReviewAction::Comment,
+        };
+
+        // Post summary comment using gh pr review
+        github::submit_review(&self.repo, self.pr_number, app_action, &review.summary).await?;
+
+        // Post inline comments with rate limit handling
+        for comment in &review.comments {
+            if let Err(e) = github::create_review_comment(
+                &self.repo,
+                self.pr_number,
+                &context.head_sha,
+                &comment.path,
+                comment.line,
+                &comment.body,
+            )
+            .await
+            {
+                warn!(
+                    "Failed to post inline comment on {}:{}: {}",
+                    comment.path, comment.line, e
+                );
+            }
+            // Rate limit mitigation: small delay between API calls
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        Ok(())
+    }
+
+    /// Fetch external comments from bots (Copilot, CodeRabbit, etc.)
+    async fn fetch_external_comments(&self) -> Vec<ExternalComment> {
+        let mut comments = Vec::new();
+
+        // Fetch review comments (inline comments on diff)
+        if let Ok(review_comments) = fetch_review_comments(&self.repo, self.pr_number).await {
+            for c in review_comments {
+                if is_bot_user(&c.user.login) {
+                    comments.push(ExternalComment {
+                        source: c.user.login.clone(),
+                        path: Some(c.path.clone()),
+                        line: c.line,
+                        body: c.body.clone(),
+                    });
+                }
+            }
+        }
+
+        // Fetch discussion comments (general PR comments)
+        if let Ok(discussion) = fetch_discussion_comments(&self.repo, self.pr_number).await {
+            for c in discussion {
+                if is_bot_user(&c.user.login) {
+                    comments.push(ExternalComment {
+                        source: c.user.login.clone(),
+                        path: None,
+                        line: None,
+                        body: c.body.clone(),
+                    });
+                }
+            }
+        }
+
+        // Limit the number of comments
+        comments.truncate(MAX_EXTERNAL_COMMENTS);
+        comments
+    }
+
+    /// Update head_sha from PR (after reviewee pushes)
+    async fn update_head_sha(&mut self) -> Result<()> {
+        let pr = github::fetch_pr(&self.repo, self.pr_number).await?;
+        if let Some(ref mut ctx) = self.context {
+            ctx.head_sha = pr.head.sha.clone();
+        }
+        Ok(())
+    }
+
+    /// Fetch current diff from GitHub API
+    async fn fetch_current_diff(&self) -> Result<String> {
+        github::fetch_pr_diff(&self.repo, self.pr_number).await
+    }
+
     #[allow(dead_code)]
     pub fn session(&self) -> &RallySession {
         &self.session
+    }
+}
+
+/// Check if a user is a bot
+fn is_bot_user(login: &str) -> bool {
+    BOT_SUFFIXES.iter().any(|suffix| login.ends_with(suffix)) || BOT_EXACT_MATCHES.contains(&login)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_bot_user() {
+        // Bot suffixes
+        assert!(is_bot_user("copilot[bot]"));
+        assert!(is_bot_user("coderabbitai[bot]"));
+        assert!(is_bot_user("renovate[bot]"));
+
+        // Exact matches
+        assert!(is_bot_user("github-actions"));
+        assert!(is_bot_user("dependabot"));
+
+        // Non-bot users
+        assert!(!is_bot_user("ushironoko"));
+        assert!(!is_bot_user("octocat"));
+        assert!(!is_bot_user("bot")); // "bot" alone is not a bot suffix
     }
 }
