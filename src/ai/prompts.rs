@@ -399,8 +399,7 @@ mod tests {
         assert!(prompt.contains("general")); // For the comment without path
 
         // Check git instructions are present
-        assert!(prompt.contains("git push"));
-        assert!(prompt.contains("NEVER use `git push --force`"));
+        assert!(prompt.contains("Do NOT use `git push`"));
     }
 
     #[test]
