@@ -57,6 +57,22 @@ or --repo owner/repo --pr 123
 | `--refresh` | Force refresh, ignore cache |
 | `--cache-ttl <SECS>` | Cache TTL in seconds (default: 300) |
 
+### Initialize Configuration
+
+Create default config files and prompt templates:
+
+```bash
+or init          # Create config files (skip if exists)
+or init --force  # Overwrite existing files
+```
+
+This creates:
+- `~/.config/octorus/config.toml` - Main configuration file
+- `~/.config/octorus/prompts/` - Prompt template directory
+  - `reviewer.md` - Reviewer agent prompt template
+  - `reviewee.md` - Reviewee agent prompt template
+  - `rereview.md` - Re-review prompt template
+
 ### Keybindings
 
 #### File List View
@@ -97,16 +113,21 @@ or --repo owner/repo --pr 123
 
 ## Configuration
 
-Create `~/.config/octorus/config.toml`:
+Run `or init` to create default config files, or create `~/.config/octorus/config.toml` manually:
 
 ```toml
 # Editor to use for writing comments
-editor = "hx"
+editor = "vi"
+
+[diff]
+# Syntax highlighting theme for diff view
+theme = "base16-ocean.dark"
 
 [keybindings]
 approve = 'a'
 request_changes = 'r'
 comment = 'c'
+suggestion = 's'
 
 [ai]
 # AI agent to use for reviewer/reviewee (currently only "claude" is supported)
@@ -119,12 +140,38 @@ max_iterations = 10
 # Timeout per agent execution (seconds)
 timeout_secs = 600
 
-# Custom prompt to prepend to the reviewer's default prompt
-# reviewer_prompt = "Focus on security issues and performance."
-
-# Custom prompt to prepend to the reviewee's default prompt
-# reviewee_prompt = "Always run tests before committing."
+# Custom prompt directory (default: ~/.config/octorus/prompts/)
+# prompt_dir = "/custom/path/to/prompts"
 ```
+
+### Customizing Prompt Templates
+
+AI Rally uses customizable prompt templates. Run `or init` to generate default templates, then edit them as needed:
+
+```
+~/.config/octorus/prompts/
+├── reviewer.md    # Prompt for the reviewer agent
+├── reviewee.md    # Prompt for the reviewee agent
+└── rereview.md    # Prompt for re-review iterations
+```
+
+Templates support variable substitution with `{{variable}}` syntax:
+
+| Variable | Description | Available In |
+|----------|-------------|--------------|
+| `{{repo}}` | Repository name (e.g., "owner/repo") | All |
+| `{{pr_number}}` | Pull request number | All |
+| `{{pr_title}}` | Pull request title | All |
+| `{{pr_body}}` | Pull request description | reviewer |
+| `{{diff}}` | PR diff content | reviewer |
+| `{{iteration}}` | Current iteration number | All |
+| `{{review_summary}}` | Summary from reviewer | reviewee |
+| `{{review_action}}` | Review action (Approve/RequestChanges/Comment) | reviewee |
+| `{{review_comments}}` | List of review comments | reviewee |
+| `{{blocking_issues}}` | List of blocking issues | reviewee |
+| `{{external_comments}}` | Comments from external tools | reviewee |
+| `{{changes_summary}}` | Summary of changes made | rereview |
+| `{{updated_diff}}` | Updated diff after fixes | rereview |
 
 ## AI Rally
 

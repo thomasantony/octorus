@@ -7,10 +7,7 @@ use xdg::BaseDirectories;
 const DEFAULT_CONFIG: &str = r#"editor = "vi"
 
 [diff]
-renderer = "delta"
 theme = "base16-ocean.dark"
-side_by_side = true
-line_numbers = true
 
 [keybindings]
 approve = 'a'

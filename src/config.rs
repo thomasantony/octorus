@@ -27,9 +27,6 @@ pub struct AiConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DiffConfig {
-    pub renderer: String,
-    pub side_by_side: bool,
-    pub line_numbers: bool,
     pub theme: String,
 }
 
@@ -68,9 +65,6 @@ impl Default for AiConfig {
 impl Default for DiffConfig {
     fn default() -> Self {
         Self {
-            renderer: "delta".to_owned(),
-            side_by_side: true,
-            line_numbers: true,
             theme: "base16-ocean.dark".to_owned(),
         }
     }
