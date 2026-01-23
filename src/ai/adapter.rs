@@ -3,6 +3,9 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc;
+
+use super::orchestrator::RallyEvent;
 
 /// Context information passed to agents
 #[derive(Debug, Clone)]
@@ -87,6 +90,9 @@ pub struct RevieweeOutput {
 pub trait AgentAdapter: Send + Sync {
     /// Agent name (claude, codex, gemini, etc.)
     fn name(&self) -> &str;
+
+    /// Set event sender for streaming events
+    fn set_event_sender(&mut self, sender: mpsc::Sender<RallyEvent>);
 
     /// Run as reviewer
     async fn run_reviewer(&mut self, prompt: &str, context: &Context) -> Result<ReviewerOutput>;

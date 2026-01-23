@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use xdg::BaseDirectories;
 
 use super::{RallyState, RevieweeOutput, ReviewerOutput};
+use crate::cache::sanitize_repo_name;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RallySession {
@@ -41,7 +42,7 @@ pub enum HistoryEntryType {
 }
 
 fn rally_dir(repo: &str, pr_number: u32) -> Result<PathBuf> {
-    let safe_repo = repo.replace('/', "_");
+    let safe_repo = sanitize_repo_name(repo)?;
     let dir = BaseDirectories::with_prefix("octorus")
         .map(|dirs| {
             dirs.get_cache_home()
@@ -141,8 +142,8 @@ pub fn write_history_entry(
         entry_type: entry.clone(),
         timestamp: chrono_now(),
     };
-    let content =
-        serde_json::to_string_pretty(&history_entry).context("Failed to serialize history entry")?;
+    let content = serde_json::to_string_pretty(&history_entry)
+        .context("Failed to serialize history entry")?;
     fs::write(&path, content).context("Failed to write history file")?;
 
     Ok(())

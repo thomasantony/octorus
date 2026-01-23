@@ -23,6 +23,38 @@ pub enum AppState {
     AiRally,
 }
 
+/// Log event type for AI Rally
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogEventType {
+    Info,
+    Thinking,
+    ToolUse,
+    ToolResult,
+    Text,
+    Review,
+    Fix,
+    Error,
+}
+
+/// Structured log entry for AI Rally
+#[derive(Debug, Clone)]
+pub struct LogEntry {
+    pub timestamp: String,
+    pub event_type: LogEventType,
+    pub message: String,
+}
+
+impl LogEntry {
+    pub fn new(event_type: LogEventType, message: String) -> Self {
+        let now = chrono::Local::now();
+        Self {
+            timestamp: now.format("%H:%M:%S").to_string(),
+            event_type,
+            message,
+        }
+    }
+}
+
 /// State for AI Rally view
 #[derive(Debug, Clone)]
 pub struct AiRallyState {
@@ -30,7 +62,8 @@ pub struct AiRallyState {
     pub max_iterations: u32,
     pub state: RallyState,
     pub history: Vec<RallyEvent>,
-    pub logs: Vec<String>,
+    pub logs: Vec<LogEntry>,
+    pub log_scroll_offset: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -323,9 +356,60 @@ impl App {
                             }
                             RallyEvent::IterationStarted(i) => {
                                 rally_state.iteration = *i;
+                                rally_state.logs.push(LogEntry::new(
+                                    LogEventType::Info,
+                                    format!("Starting iteration {}", i),
+                                ));
                             }
                             RallyEvent::Log(msg) => {
-                                rally_state.logs.push(msg.clone());
+                                rally_state
+                                    .logs
+                                    .push(LogEntry::new(LogEventType::Info, msg.clone()));
+                            }
+                            RallyEvent::AgentThinking(content) => {
+                                // Truncate thinking content for display (char-safe)
+                                let display = truncate_chars(content, 100);
+                                rally_state
+                                    .logs
+                                    .push(LogEntry::new(LogEventType::Thinking, display));
+                            }
+                            RallyEvent::AgentToolUse(tool_name, input) => {
+                                rally_state.logs.push(LogEntry::new(
+                                    LogEventType::ToolUse,
+                                    format!("{}: {}", tool_name, input),
+                                ));
+                            }
+                            RallyEvent::AgentToolResult(tool_name, result) => {
+                                // Truncate result for display (char-safe)
+                                let display = truncate_chars(result, 80);
+                                rally_state.logs.push(LogEntry::new(
+                                    LogEventType::ToolResult,
+                                    format!("{}: {}", tool_name, display),
+                                ));
+                            }
+                            RallyEvent::AgentText(text) => {
+                                // Truncate text for display (char-safe)
+                                let display = truncate_chars(text, 100);
+                                rally_state
+                                    .logs
+                                    .push(LogEntry::new(LogEventType::Text, display));
+                            }
+                            RallyEvent::ReviewCompleted(_) => {
+                                rally_state.logs.push(LogEntry::new(
+                                    LogEventType::Review,
+                                    "Review completed".to_string(),
+                                ));
+                            }
+                            RallyEvent::FixCompleted(_) => {
+                                rally_state.logs.push(LogEntry::new(
+                                    LogEventType::Fix,
+                                    "Fix completed".to_string(),
+                                ));
+                            }
+                            RallyEvent::Error(e) => {
+                                rally_state
+                                    .logs
+                                    .push(LogEntry::new(LogEventType::Error, e.clone()));
                             }
                             _ => {}
                         }
@@ -483,11 +567,25 @@ impl App {
             }
             KeyCode::Char('y') => {
                 // Grant permission or answer yes
-                if let Some(ref state) = self.ai_rally_state {
-                    if state.state == RallyState::WaitingForPermission
-                        || state.state == RallyState::WaitingForClarification
-                    {
-                        // TODO: Continue the rally with permission/clarification
+                // Note: Currently, the rally process returns RallyResult::Aborted when
+                // WaitingForPermission or WaitingForClarification state is reached.
+                // A full implementation would need to:
+                // 1. Store the Orchestrator instance for resumption
+                // 2. Implement user input collection (e.g., via editor for clarification)
+                // 3. Call orchestrator.continue_with_permission() or continue_with_clarification()
+                //
+                // For now, pressing 'y' just logs a message indicating the limitation.
+                if let Some(ref mut rally_state) = self.ai_rally_state {
+                    if rally_state.state == RallyState::WaitingForPermission {
+                        rally_state.logs.push(LogEntry::new(
+                            LogEventType::Info,
+                            "Permission continuation is not yet fully implemented. Press 'q' to abort and manually apply changes.".to_string(),
+                        ));
+                    } else if rally_state.state == RallyState::WaitingForClarification {
+                        rally_state.logs.push(LogEntry::new(
+                            LogEventType::Info,
+                            "Clarification continuation is not yet fully implemented. Press 'q' to abort and manually provide clarification.".to_string(),
+                        ));
                     }
                 }
             }
@@ -500,6 +598,42 @@ impl App {
                         self.rally_event_receiver = None;
                         self.state = AppState::FileList;
                     }
+                }
+            }
+            // Log scrolling
+            KeyCode::Char('j') | KeyCode::Down => {
+                if let Some(ref mut rally_state) = self.ai_rally_state {
+                    let total_logs = rally_state.logs.len();
+                    if rally_state.log_scroll_offset == 0 {
+                        // Start from current auto-scroll position
+                        rally_state.log_scroll_offset = total_logs.saturating_sub(10);
+                    }
+                    rally_state.log_scroll_offset = rally_state
+                        .log_scroll_offset
+                        .saturating_add(1)
+                        .min(total_logs.saturating_sub(1));
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                if let Some(ref mut rally_state) = self.ai_rally_state {
+                    if rally_state.log_scroll_offset == 0 {
+                        // Start from current auto-scroll position
+                        let total_logs = rally_state.logs.len();
+                        rally_state.log_scroll_offset = total_logs.saturating_sub(10);
+                    }
+                    rally_state.log_scroll_offset = rally_state.log_scroll_offset.saturating_sub(1);
+                }
+            }
+            KeyCode::Char('G') => {
+                // Jump to bottom (reset auto-scroll)
+                if let Some(ref mut rally_state) = self.ai_rally_state {
+                    rally_state.log_scroll_offset = 0; // 0 means auto-scroll to bottom
+                }
+            }
+            KeyCode::Char('g') => {
+                // Jump to top
+                if let Some(ref mut rally_state) = self.ai_rally_state {
+                    rally_state.log_scroll_offset = 1; // 1 is minimum (not 0 which means auto-scroll)
                 }
             }
             _ => {}
@@ -540,6 +674,7 @@ impl App {
             state: RallyState::Initializing,
             history: Vec::new(),
             logs: Vec::new(),
+            log_scroll_offset: 0,
         });
 
         self.state = AppState::AiRally;
@@ -550,14 +685,20 @@ impl App {
         let pr_number = self.pr_number;
 
         tokio::spawn(async move {
-            let orchestrator_result = Orchestrator::new(&repo, pr_number, config, event_tx);
+            let orchestrator_result = Orchestrator::new(&repo, pr_number, config, event_tx.clone());
             match orchestrator_result {
                 Ok(mut orchestrator) => {
                     orchestrator.set_context(context);
                     let _ = orchestrator.run().await;
                 }
                 Err(e) => {
-                    eprintln!("Failed to create orchestrator: {}", e);
+                    // Send error via event channel so it displays in TUI
+                    let _ = event_tx
+                        .send(RallyEvent::Error(format!(
+                            "Failed to create orchestrator: {}",
+                            e
+                        )))
+                        .await;
                 }
             }
         });
@@ -952,9 +1093,9 @@ impl App {
             tokio::spawn(async move {
                 match github::comment::fetch_discussion_comments(&repo, pr_number).await {
                     Ok(comments) => {
-                        if let Err(e) =
-                            crate::cache::write_discussion_comment_cache(&repo, pr_number, &comments)
-                        {
+                        if let Err(e) = crate::cache::write_discussion_comment_cache(
+                            &repo, pr_number, &comments,
+                        ) {
                             eprintln!("Warning: Failed to write discussion comment cache: {}", e);
                         }
                         let _ = tx.send(Ok(comments)).await;
@@ -1011,8 +1152,9 @@ impl App {
                 CommentTab::Discussion => {
                     if let Some(ref comments) = self.discussion_comments {
                         if !comments.is_empty() {
-                            self.selected_discussion_comment = (self.selected_discussion_comment + 1)
-                                .min(comments.len().saturating_sub(1));
+                            self.selected_discussion_comment = (self.selected_discussion_comment
+                                + 1)
+                            .min(comments.len().saturating_sub(1));
                         }
                     }
                 }
@@ -1023,7 +1165,8 @@ impl App {
                     self.adjust_comment_scroll(visible_lines);
                 }
                 CommentTab::Discussion => {
-                    self.selected_discussion_comment = self.selected_discussion_comment.saturating_sub(1);
+                    self.selected_discussion_comment =
+                        self.selected_discussion_comment.saturating_sub(1);
                 }
             },
             KeyCode::Enter => match self.comment_tab {
@@ -1158,5 +1301,16 @@ impl App {
         }
 
         None
+    }
+}
+
+/// Truncate string by character count (UTF-8 safe)
+fn truncate_chars(s: &str, max_chars: usize) -> String {
+    let char_count = s.chars().count();
+    if char_count <= max_chars {
+        s.to_string()
+    } else {
+        let truncated: String = s.chars().take(max_chars.saturating_sub(3)).collect();
+        format!("{}...", truncated)
     }
 }

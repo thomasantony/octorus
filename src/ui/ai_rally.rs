@@ -2,12 +2,14 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
+    widgets::{
+        Block, Borders, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
+    },
     Frame,
 };
 
 use crate::ai::{RallyState, ReviewAction, RevieweeStatus};
-use crate::app::{AiRallyState, App};
+use crate::app::{AiRallyState, App, LogEntry, LogEventType};
 
 pub fn render(frame: &mut Frame, app: &App) {
     let Some(rally_state) = &app.ai_rally_state else {
@@ -55,7 +57,12 @@ fn render_header(frame: &mut Frame, area: Rect, state: &AiRallyState) {
 
     let header = Paragraph::new(Line::from(vec![
         Span::styled("Status: ", Style::default().fg(Color::Gray)),
-        Span::styled(state_text, Style::default().fg(state_color).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            state_text,
+            Style::default()
+                .fg(state_color)
+                .add_modifier(Modifier::BOLD),
+        ),
     ]))
     .block(
         Block::default()
@@ -71,8 +78,8 @@ fn render_main_content(frame: &mut Frame, area: Rect, state: &AiRallyState) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Percentage(60), // History
-            Constraint::Percentage(40), // Logs
+            Constraint::Percentage(50), // History
+            Constraint::Percentage(50), // Logs
         ])
         .split(area);
 
@@ -84,11 +91,13 @@ fn render_history(frame: &mut Frame, area: Rect, state: &AiRallyState) {
     let items: Vec<ListItem> = state
         .history
         .iter()
-        .map(|event| {
+        .filter_map(|event| {
             let (prefix, content, color) = match event {
-                crate::ai::orchestrator::RallyEvent::IterationStarted(i) => {
-                    (format!("[{}]", i), "Iteration started".to_string(), Color::Blue)
-                }
+                crate::ai::orchestrator::RallyEvent::IterationStarted(i) => (
+                    format!("[{}]", i),
+                    "Iteration started".to_string(),
+                    Color::Blue,
+                ),
                 crate::ai::orchestrator::RallyEvent::ReviewCompleted(review) => {
                     let action_text = match review.action {
                         ReviewAction::Approve => "APPROVE",
@@ -126,84 +135,154 @@ fn render_history(frame: &mut Frame, area: Rect, state: &AiRallyState) {
                         color,
                     )
                 }
-                crate::ai::orchestrator::RallyEvent::ClarificationNeeded(q) => {
-                    ("Clarification".to_string(), truncate_string(q, 60), Color::Magenta)
-                }
+                crate::ai::orchestrator::RallyEvent::ClarificationNeeded(q) => (
+                    "Clarification".to_string(),
+                    truncate_string(q, 60),
+                    Color::Magenta,
+                ),
                 crate::ai::orchestrator::RallyEvent::PermissionNeeded(action, _) => (
                     "Permission".to_string(),
                     truncate_string(action, 60),
                     Color::Magenta,
                 ),
-                crate::ai::orchestrator::RallyEvent::Approved(summary) => {
-                    ("APPROVED".to_string(), truncate_string(summary, 60), Color::Green)
-                }
+                crate::ai::orchestrator::RallyEvent::Approved(summary) => (
+                    "APPROVED".to_string(),
+                    truncate_string(summary, 60),
+                    Color::Green,
+                ),
                 crate::ai::orchestrator::RallyEvent::Error(e) => {
                     ("ERROR".to_string(), truncate_string(e, 60), Color::Red)
                 }
-                _ => ("".to_string(), "".to_string(), Color::Gray),
+                _ => return None,
             };
 
-            if prefix.is_empty() {
-                ListItem::new(Line::from(vec![]))
-            } else {
-                ListItem::new(Line::from(vec![
-                    Span::styled(
-                        format!("{}: ", prefix),
-                        Style::default().fg(color).add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(content, Style::default().fg(Color::White)),
-                ]))
-            }
+            Some(ListItem::new(Line::from(vec![
+                Span::styled(
+                    format!("{}: ", prefix),
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(content, Style::default().fg(Color::White)),
+            ])))
         })
-        .filter(|item| !item.height() == 0)
         .collect();
 
-    let list = List::new(items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" History ")
-                .border_style(Style::default().fg(Color::Gray)),
-        );
+    let list = List::new(items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" History ")
+            .border_style(Style::default().fg(Color::Gray)),
+    );
 
     frame.render_widget(list, area);
 }
 
 fn render_logs(frame: &mut Frame, area: Rect, state: &AiRallyState) {
-    let log_text = state
+    let visible_height = area.height.saturating_sub(2) as usize; // subtract borders
+    let total_logs = state.logs.len();
+
+    // Calculate scroll position (auto-scroll to bottom by default unless user has scrolled up)
+    let scroll_offset = if state.log_scroll_offset == 0 {
+        // Auto-scroll: show latest logs
+        total_logs.saturating_sub(visible_height)
+    } else {
+        state.log_scroll_offset
+    };
+
+    let items: Vec<ListItem> = state
         .logs
         .iter()
-        .rev()
-        .take(10)
-        .rev()
-        .cloned()
-        .collect::<Vec<_>>()
-        .join("\n");
+        .skip(scroll_offset)
+        .take(visible_height)
+        .map(|entry| format_log_entry(entry))
+        .collect();
 
-    let logs = Paragraph::new(log_text)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Logs ")
-                .border_style(Style::default().fg(Color::Gray)),
-        )
-        .wrap(Wrap { trim: true });
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(format!(
+            " Logs ({}/{}) [↑↓ scroll] ",
+            scroll_offset.saturating_add(visible_height).min(total_logs),
+            total_logs
+        ))
+        .border_style(Style::default().fg(Color::Gray));
 
-    frame.render_widget(logs, area);
+    let inner_area = block.inner(area);
+    frame.render_widget(block, area);
+
+    let list = List::new(items);
+    frame.render_widget(list, inner_area);
+
+    // Render scrollbar if there are more logs than visible
+    if total_logs > visible_height {
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(Some("▲"))
+            .end_symbol(Some("▼"));
+
+        let mut scrollbar_state =
+            ScrollbarState::new(total_logs.saturating_sub(visible_height)).position(scroll_offset);
+
+        frame.render_stateful_widget(
+            scrollbar,
+            area.inner(ratatui::layout::Margin {
+                vertical: 1,
+                horizontal: 0,
+            }),
+            &mut scrollbar_state,
+        );
+    }
+}
+
+fn format_log_entry(entry: &LogEntry) -> ListItem<'static> {
+    // Use ASCII characters for better terminal compatibility
+    // Some terminals may not render emojis correctly
+    let (icon, color) = match entry.event_type {
+        LogEventType::Info => ("[i]", Color::Blue),
+        LogEventType::Thinking => ("[~]", Color::Magenta),
+        LogEventType::ToolUse => ("[>]", Color::Cyan),
+        LogEventType::ToolResult => ("[+]", Color::Green),
+        LogEventType::Text => ("[.]", Color::White),
+        LogEventType::Review => ("[R]", Color::Yellow),
+        LogEventType::Fix => ("[F]", Color::Cyan),
+        LogEventType::Error => ("[!]", Color::Red),
+    };
+
+    let type_label = match entry.event_type {
+        LogEventType::Info => "Info",
+        LogEventType::Thinking => "Think",
+        LogEventType::ToolUse => "Tool",
+        LogEventType::ToolResult => "Result",
+        LogEventType::Text => "Output",
+        LogEventType::Review => "Review",
+        LogEventType::Fix => "Fix",
+        LogEventType::Error => "Error",
+    };
+
+    ListItem::new(Line::from(vec![
+        Span::styled(
+            format!("[{}] ", entry.timestamp),
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::styled(format!("{} ", icon), Style::default().fg(color)),
+        Span::styled(
+            format!("{}: ", type_label),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(entry.message.clone(), Style::default().fg(Color::White)),
+    ]))
 }
 
 fn render_status_bar(frame: &mut Frame, area: Rect, state: &AiRallyState) {
     let help_text = match state.state {
-        RallyState::WaitingForClarification => "y: Answer | n: Skip | q: Abort",
-        RallyState::WaitingForPermission => "y: Grant | n: Deny | q: Abort",
-        RallyState::Completed => "q: Close",
-        RallyState::Error => "r: Retry | q: Close",
-        _ => "q: Abort",
+        RallyState::WaitingForClarification => "y: Answer | n: Skip | ↑↓: Scroll logs | q: Abort",
+        RallyState::WaitingForPermission => "y: Grant | n: Deny | ↑↓: Scroll logs | q: Abort",
+        RallyState::Completed => "↑↓: Scroll logs | q: Close",
+        RallyState::Error => "r: Retry | ↑↓: Scroll logs | q: Close",
+        _ => "↑↓: Scroll logs | q: Abort",
     };
 
-    let status_bar = Paragraph::new(Line::from(vec![
-        Span::styled(help_text, Style::default().fg(Color::Cyan)),
-    ]))
+    let status_bar = Paragraph::new(Line::from(vec![Span::styled(
+        help_text,
+        Style::default().fg(Color::Cyan),
+    )]))
     .block(
         Block::default()
             .borders(Borders::ALL)
@@ -213,10 +292,12 @@ fn render_status_bar(frame: &mut Frame, area: Rect, state: &AiRallyState) {
     frame.render_widget(status_bar, area);
 }
 
-fn truncate_string(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
+fn truncate_string(s: &str, max_chars: usize) -> String {
+    let char_count = s.chars().count();
+    if char_count <= max_chars {
         s.to_string()
     } else {
-        format!("{}...", &s[..max_len.saturating_sub(3)])
+        let truncated: String = s.chars().take(max_chars.saturating_sub(3)).collect();
+        format!("{}...", truncated)
     }
 }

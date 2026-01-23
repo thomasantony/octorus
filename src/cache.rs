@@ -10,6 +10,41 @@ use crate::github::{ChangedFile, PullRequest};
 #[allow(dead_code)]
 pub const DEFAULT_TTL_SECS: u64 = 300; // 5分
 
+/// Sanitize repository name to prevent path traversal attacks.
+/// Only allows alphanumeric characters, underscores, hyphens, and single dots (not ".." sequences).
+/// Returns a sanitized string with '/' replaced by '_'.
+pub fn sanitize_repo_name(repo: &str) -> Result<String> {
+    // Check for path traversal patterns
+    if repo.contains("..") || repo.starts_with('/') || repo.starts_with('\\') {
+        return Err(anyhow::anyhow!(
+            "Invalid repository name: contains path traversal pattern"
+        ));
+    }
+
+    // Replace forward slash with underscore (for owner/repo format)
+    let sanitized = repo.replace('/', "_");
+
+    // Validate that the result contains only safe characters
+    // Allow: alphanumeric, underscore, hyphen, single dot (for names like "foo.js")
+    for c in sanitized.chars() {
+        if !c.is_alphanumeric() && c != '_' && c != '-' && c != '.' {
+            return Err(anyhow::anyhow!(
+                "Invalid repository name: contains invalid character '{}'",
+                c
+            ));
+        }
+    }
+
+    // Ensure it doesn't start with a dot (hidden file/directory)
+    if sanitized.starts_with('.') {
+        return Err(anyhow::anyhow!(
+            "Invalid repository name: cannot start with a dot"
+        ));
+    }
+
+    Ok(sanitized)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CacheEntry {
     pub pr: PullRequest,
@@ -32,14 +67,15 @@ pub fn cache_dir() -> PathBuf {
 }
 
 /// キャッシュファイルパス: ~/.cache/octorus/{owner}_{repo}_{pr}.json
-pub fn cache_file_path(repo: &str, pr_number: u32) -> PathBuf {
-    let sanitized = repo.replace('/', "_");
-    cache_dir().join(format!("{}_{}.json", sanitized, pr_number))
+/// Returns an error if the repository name contains invalid characters or path traversal patterns.
+pub fn cache_file_path(repo: &str, pr_number: u32) -> Result<PathBuf> {
+    let sanitized = sanitize_repo_name(repo)?;
+    Ok(cache_dir().join(format!("{}_{}.json", sanitized, pr_number)))
 }
 
 /// キャッシュ読み込み
 pub fn read_cache(repo: &str, pr_number: u32, ttl_secs: u64) -> Result<CacheResult<CacheEntry>> {
-    let path = cache_file_path(repo, pr_number);
+    let path = cache_file_path(repo, pr_number)?;
     if !path.exists() {
         return Ok(CacheResult::Miss);
     }
@@ -78,14 +114,14 @@ pub fn write_cache(
     };
 
     let content = serde_json::to_string_pretty(&entry)?;
-    std::fs::write(cache_file_path(repo, pr_number), content)?;
+    std::fs::write(cache_file_path(repo, pr_number)?, content)?;
     Ok(())
 }
 
 /// PRキャッシュ削除
 #[allow(dead_code)]
 pub fn invalidate_cache(repo: &str, pr_number: u32) -> Result<()> {
-    let path = cache_file_path(repo, pr_number);
+    let path = cache_file_path(repo, pr_number)?;
     if path.exists() {
         std::fs::remove_file(path)?;
     }
@@ -95,17 +131,17 @@ pub fn invalidate_cache(repo: &str, pr_number: u32) -> Result<()> {
 /// 全キャッシュ削除（PR + コメント + ディスカッションコメント）
 pub fn invalidate_all_cache(repo: &str, pr_number: u32) -> Result<()> {
     // PR cache
-    let pr_path = cache_file_path(repo, pr_number);
+    let pr_path = cache_file_path(repo, pr_number)?;
     if pr_path.exists() {
         std::fs::remove_file(pr_path)?;
     }
     // Comment cache
-    let comment_path = comment_cache_file_path(repo, pr_number);
+    let comment_path = comment_cache_file_path(repo, pr_number)?;
     if comment_path.exists() {
         std::fs::remove_file(comment_path)?;
     }
     // Discussion comment cache
-    let discussion_comment_path = discussion_comment_cache_file_path(repo, pr_number);
+    let discussion_comment_path = discussion_comment_cache_file_path(repo, pr_number)?;
     if discussion_comment_path.exists() {
         std::fs::remove_file(discussion_comment_path)?;
     }
@@ -121,9 +157,10 @@ pub struct CommentCacheEntry {
 }
 
 /// コメントキャッシュファイルパス: ~/.cache/octorus/{owner}_{repo}_{pr}_comments.json
-pub fn comment_cache_file_path(repo: &str, pr_number: u32) -> PathBuf {
-    let sanitized = repo.replace('/', "_");
-    cache_dir().join(format!("{}_{}_comments.json", sanitized, pr_number))
+/// Returns an error if the repository name contains invalid characters or path traversal patterns.
+pub fn comment_cache_file_path(repo: &str, pr_number: u32) -> Result<PathBuf> {
+    let sanitized = sanitize_repo_name(repo)?;
+    Ok(cache_dir().join(format!("{}_{}_comments.json", sanitized, pr_number)))
 }
 
 /// コメントキャッシュ読み込み
@@ -132,7 +169,7 @@ pub fn read_comment_cache(
     pr_number: u32,
     ttl_secs: u64,
 ) -> Result<CacheResult<CommentCacheEntry>> {
-    let path = comment_cache_file_path(repo, pr_number);
+    let path = comment_cache_file_path(repo, pr_number)?;
     if !path.exists() {
         return Ok(CacheResult::Miss);
     }
@@ -164,7 +201,7 @@ pub fn write_comment_cache(repo: &str, pr_number: u32, comments: &[ReviewComment
     };
 
     let content = serde_json::to_string_pretty(&entry)?;
-    std::fs::write(comment_cache_file_path(repo, pr_number), content)?;
+    std::fs::write(comment_cache_file_path(repo, pr_number)?, content)?;
     Ok(())
 }
 
@@ -177,9 +214,13 @@ pub struct DiscussionCommentCacheEntry {
 }
 
 /// ディスカッションコメントキャッシュファイルパス: ~/.cache/octorus/{owner}_{repo}_{pr}_discussion_comments.json
-pub fn discussion_comment_cache_file_path(repo: &str, pr_number: u32) -> PathBuf {
-    let sanitized = repo.replace('/', "_");
-    cache_dir().join(format!("{}_{}_discussion_comments.json", sanitized, pr_number))
+/// Returns an error if the repository name contains invalid characters or path traversal patterns.
+pub fn discussion_comment_cache_file_path(repo: &str, pr_number: u32) -> Result<PathBuf> {
+    let sanitized = sanitize_repo_name(repo)?;
+    Ok(cache_dir().join(format!(
+        "{}_{}_discussion_comments.json",
+        sanitized, pr_number
+    )))
 }
 
 /// ディスカッションコメントキャッシュ読み込み
@@ -188,7 +229,7 @@ pub fn read_discussion_comment_cache(
     pr_number: u32,
     ttl_secs: u64,
 ) -> Result<CacheResult<DiscussionCommentCacheEntry>> {
-    let path = discussion_comment_cache_file_path(repo, pr_number);
+    let path = discussion_comment_cache_file_path(repo, pr_number)?;
     if !path.exists() {
         return Ok(CacheResult::Miss);
     }
@@ -224,6 +265,6 @@ pub fn write_discussion_comment_cache(
     };
 
     let content = serde_json::to_string_pretty(&entry)?;
-    std::fs::write(discussion_comment_cache_file_path(repo, pr_number), content)?;
+    std::fs::write(discussion_comment_cache_file_path(repo, pr_number)?, content)?;
     Ok(())
 }

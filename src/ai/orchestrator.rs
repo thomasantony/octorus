@@ -8,15 +8,15 @@ use tokio::time::timeout;
 
 use crate::config::AiConfig;
 
-use super::adapter::{AgentAdapter, Context, ReviewAction, RevieweeOutput, RevieweeStatus, ReviewerOutput};
+use super::adapter::{
+    AgentAdapter, Context, ReviewAction, RevieweeOutput, RevieweeStatus, ReviewerOutput,
+};
 use super::adapters::create_adapter;
 use super::prompts::{
     build_clarification_prompt, build_permission_granted_prompt, build_rereview_prompt,
     build_reviewee_prompt, build_reviewer_prompt,
 };
-use super::session::{
-    write_history_entry, write_session, HistoryEntryType, RallySession,
-};
+use super::session::{write_history_entry, write_session, HistoryEntryType, RallySession};
 
 /// Rally state
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,26 +42,20 @@ pub enum RallyEvent {
     Approved(String),                 // summary
     Error(String),
     Log(String),
+    // Streaming events from Claude
+    AgentThinking(String),           // thinking content
+    AgentToolUse(String, String),    // tool_name, input_summary
+    AgentToolResult(String, String), // tool_name, result_summary
+    AgentText(String),               // text output
 }
 
 /// Result of the rally process
 #[derive(Debug)]
 pub enum RallyResult {
-    Approved {
-        iteration: u32,
-        summary: String,
-    },
-    MaxIterationsReached {
-        iteration: u32,
-    },
-    Aborted {
-        iteration: u32,
-        reason: String,
-    },
-    Error {
-        iteration: u32,
-        error: String,
-    },
+    Approved { iteration: u32, summary: String },
+    MaxIterationsReached { iteration: u32 },
+    Aborted { iteration: u32, reason: String },
+    Error { iteration: u32, error: String },
 }
 
 /// Main orchestrator for AI rally
@@ -74,6 +68,7 @@ pub struct Orchestrator {
     session: RallySession,
     context: Option<Context>,
     last_review: Option<ReviewerOutput>,
+    last_fix: Option<RevieweeOutput>,
     event_sender: mpsc::Sender<RallyEvent>,
 }
 
@@ -84,8 +79,13 @@ impl Orchestrator {
         config: AiConfig,
         event_sender: mpsc::Sender<RallyEvent>,
     ) -> Result<Self> {
-        let reviewer_adapter = create_adapter(&config.reviewer)?;
-        let reviewee_adapter = create_adapter(&config.reviewee)?;
+        let mut reviewer_adapter = create_adapter(&config.reviewer)?;
+        let mut reviewee_adapter = create_adapter(&config.reviewee)?;
+
+        // Set event sender for streaming events
+        reviewer_adapter.set_event_sender(event_sender.clone());
+        reviewee_adapter.set_event_sender(event_sender.clone());
+
         let session = RallySession::new(repo, pr_number);
 
         Ok(Self {
@@ -97,6 +97,7 @@ impl Orchestrator {
             session,
             context: None,
             last_review: None,
+            last_fix: None,
             event_sender,
         })
     }
@@ -124,11 +125,8 @@ impl Orchestrator {
 
             self.send_event(RallyEvent::IterationStarted(iteration))
                 .await;
-            self.send_event(RallyEvent::Log(format!(
-                "Starting iteration {}",
-                iteration
-            )))
-            .await;
+            self.send_event(RallyEvent::Log(format!("Starting iteration {}", iteration)))
+                .await;
 
             // Run reviewer
             self.session.update_state(RallyState::ReviewerReviewing);
@@ -194,11 +192,14 @@ impl Orchestrator {
                         fix_result.summary
                     )))
                     .await;
+                    // Store the fix result for the next re-review
+                    self.last_fix = Some(fix_result.clone());
                     // Continue to next iteration
                 }
                 RevieweeStatus::NeedsClarification => {
                     if let Some(question) = &fix_result.question {
-                        self.session.update_state(RallyState::WaitingForClarification);
+                        self.session
+                            .update_state(RallyState::WaitingForClarification);
                         write_session(&self.session)?;
 
                         self.send_event(RallyEvent::ClarificationNeeded(question.clone()))
@@ -246,10 +247,7 @@ impl Orchestrator {
                     self.send_event(RallyEvent::StateChanged(RallyState::Error))
                         .await;
 
-                    return Ok(RallyResult::Error {
-                        iteration,
-                        error,
-                    });
+                    return Ok(RallyResult::Error { iteration, error });
                 }
             }
         }
@@ -299,20 +297,35 @@ impl Orchestrator {
         let prompt = if iteration == 1 {
             build_reviewer_prompt(context, iteration)
         } else {
-            // Re-review after fixes
+            // Re-review after fixes - use the fix result summary and files modified
             let changes_summary = self
-                .last_review
+                .last_fix
                 .as_ref()
-                .map(|r| r.summary.clone())
-                .unwrap_or_default();
+                .map(|f| {
+                    let files = if f.files_modified.is_empty() {
+                        "No files modified".to_string()
+                    } else {
+                        f.files_modified.join(", ")
+                    };
+                    format!("{}\n\nFiles modified: {}", f.summary, files)
+                })
+                .unwrap_or_else(|| "No changes recorded".to_string());
             build_rereview_prompt(context, iteration, &changes_summary)
         };
 
         let duration = Duration::from_secs(self.config.timeout_secs);
 
-        timeout(duration, self.reviewer_adapter.run_reviewer(&prompt, context))
-            .await
-            .map_err(|_| anyhow!("Reviewer timeout after {} seconds", self.config.timeout_secs))?
+        timeout(
+            duration,
+            self.reviewer_adapter.run_reviewer(&prompt, context),
+        )
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "Reviewer timeout after {} seconds",
+                self.config.timeout_secs
+            )
+        })?
     }
 
     async fn run_reviewee_with_timeout(
@@ -324,9 +337,17 @@ impl Orchestrator {
         let prompt = build_reviewee_prompt(context, review, iteration);
         let duration = Duration::from_secs(self.config.timeout_secs);
 
-        timeout(duration, self.reviewee_adapter.run_reviewee(&prompt, context))
-            .await
-            .map_err(|_| anyhow!("Reviewee timeout after {} seconds", self.config.timeout_secs))?
+        timeout(
+            duration,
+            self.reviewee_adapter.run_reviewee(&prompt, context),
+        )
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "Reviewee timeout after {} seconds",
+                self.config.timeout_secs
+            )
+        })?
     }
 
     async fn send_event(&self, event: RallyEvent) {

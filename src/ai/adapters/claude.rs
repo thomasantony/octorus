@@ -6,11 +6,13 @@ use serde::Deserialize;
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
+use tokio::sync::mpsc;
 
 use crate::ai::adapter::{
     AgentAdapter, Context, PermissionRequest, ReviewAction, ReviewComment, RevieweeOutput,
     RevieweeStatus, ReviewerOutput,
 };
+use crate::ai::orchestrator::RallyEvent;
 
 const REVIEWER_SCHEMA: &str = include_str!("../schemas/reviewer.json");
 const REVIEWEE_SCHEMA: &str = include_str!("../schemas/reviewee.json");
@@ -19,6 +21,7 @@ const REVIEWEE_SCHEMA: &str = include_str!("../schemas/reviewee.json");
 pub struct ClaudeAdapter {
     reviewer_session_id: Option<String>,
     reviewee_session_id: Option<String>,
+    event_sender: Option<mpsc::Sender<RallyEvent>>,
 }
 
 impl ClaudeAdapter {
@@ -26,10 +29,17 @@ impl ClaudeAdapter {
         Self {
             reviewer_session_id: None,
             reviewee_session_id: None,
+            event_sender: None,
         }
     }
 
-    async fn run_claude(
+    async fn send_event(&self, event: RallyEvent) {
+        if let Some(ref sender) = self.event_sender {
+            let _ = sender.send(event).await;
+        }
+    }
+
+    async fn run_claude_streaming(
         &self,
         prompt: &str,
         schema: &str,
@@ -39,7 +49,7 @@ impl ClaudeAdapter {
     ) -> Result<ClaudeResponse> {
         let mut cmd = Command::new("claude");
         cmd.arg("-p").arg(prompt);
-        cmd.arg("--output-format").arg("json");
+        cmd.arg("--output-format").arg("stream-json");
         cmd.arg("--json-schema").arg(schema);
         cmd.arg("--allowedTools").arg(allowed_tools);
 
@@ -59,19 +69,43 @@ impl ClaudeAdapter {
         let stdout = child.stdout.take().expect("stdout should be available");
         let stderr = child.stderr.take().expect("stderr should be available");
 
-        // Read output line by line for streaming support
         let mut stdout_reader = BufReader::new(stdout).lines();
         let mut stderr_reader = BufReader::new(stderr).lines();
 
-        let mut output_lines = Vec::new();
+        let mut final_response: Option<ClaudeResponse> = None;
         let mut error_lines = Vec::new();
 
-        // Read stdout and stderr concurrently
+        // Process NDJSON stream
         loop {
             tokio::select! {
                 line = stdout_reader.next_line() => {
                     match line {
-                        Ok(Some(l)) => output_lines.push(l),
+                        Ok(Some(l)) => {
+                            if l.trim().is_empty() {
+                                continue;
+                            }
+                            // Try to parse as stream event
+                            if let Ok(event) = serde_json::from_str::<StreamEvent>(&l) {
+                                self.handle_stream_event(&event).await;
+
+                                // Check if this is the final result
+                                if event.event_type == "result" {
+                                    // --json-schema uses structured_output, otherwise use result
+                                    let result_value = event
+                                        .structured_output
+                                        .clone()
+                                        .or_else(|| event.result.clone());
+                                    if let Some(result) = result_value {
+                                        final_response = Some(ClaudeResponse {
+                                            session_id: event.session_id.unwrap_or_default(),
+                                            result: Some(result),
+                                            cost_usd: event.cost_usd,
+                                            duration_ms: event.duration_ms,
+                                        });
+                                    }
+                                }
+                            }
+                        }
                         Ok(None) => break,
                         Err(e) => return Err(anyhow!("Error reading stdout: {}", e)),
                     }
@@ -86,7 +120,10 @@ impl ClaudeAdapter {
             }
         }
 
-        let status = child.wait().await.context("Failed to wait for claude process")?;
+        let status = child
+            .wait()
+            .await
+            .context("Failed to wait for claude process")?;
 
         if !status.success() {
             let stderr_output = error_lines.join("\n");
@@ -97,11 +134,102 @@ impl ClaudeAdapter {
             ));
         }
 
-        let stdout_output = output_lines.join("\n");
-        let response: ClaudeResponse = serde_json::from_str(&stdout_output)
-            .context("Failed to parse claude output as JSON")?;
+        final_response.ok_or_else(|| anyhow!("No result received from claude"))
+    }
 
-        Ok(response)
+    async fn handle_stream_event(&self, event: &StreamEvent) {
+        match event.event_type.as_str() {
+            "assistant" => {
+                // Assistant message event - may contain thinking or text
+                if let Some(ref message) = event.message {
+                    for content in &message.content {
+                        match content.content_type.as_str() {
+                            "thinking" => {
+                                if let Some(ref thinking) = content.thinking {
+                                    self.send_event(RallyEvent::AgentThinking(thinking.clone()))
+                                        .await;
+                                }
+                            }
+                            "text" => {
+                                if let Some(ref text) = content.text {
+                                    self.send_event(RallyEvent::AgentText(text.clone())).await;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            "content_block_start" => {
+                if let Some(ref content_block) = event.content_block {
+                    match content_block.block_type.as_str() {
+                        "tool_use" => {
+                            if let Some(ref name) = content_block.name {
+                                self.send_event(RallyEvent::AgentToolUse(
+                                    name.clone(),
+                                    "starting...".to_string(),
+                                ))
+                                .await;
+                            }
+                        }
+                        "thinking" => {
+                            self.send_event(RallyEvent::AgentThinking("Thinking...".to_string()))
+                                .await;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            "content_block_delta" => {
+                if let Some(ref delta) = event.delta {
+                    match delta.delta_type.as_str() {
+                        "thinking_delta" => {
+                            if let Some(ref thinking) = delta.thinking {
+                                self.send_event(RallyEvent::AgentThinking(thinking.clone()))
+                                    .await;
+                            }
+                        }
+                        "text_delta" => {
+                            if let Some(ref text) = delta.text {
+                                self.send_event(RallyEvent::AgentText(text.clone())).await;
+                            }
+                        }
+                        "input_json_delta" => {
+                            // Tool input being streamed - we can optionally show this
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            "content_block_stop" => {
+                // Content block completed
+            }
+            "tool_use" => {
+                // Full tool use event
+                if let Some(ref name) = event.tool_name {
+                    let input_summary = event
+                        .tool_input
+                        .as_ref()
+                        .map(summarize_json)
+                        .unwrap_or_default();
+                    self.send_event(RallyEvent::AgentToolUse(name.clone(), input_summary))
+                        .await;
+                }
+            }
+            "tool_result" => {
+                // Tool result event
+                if let Some(ref name) = event.tool_name {
+                    let result_summary = event
+                        .tool_result
+                        .as_ref()
+                        .map(|s| summarize_text(s))
+                        .unwrap_or_else(|| "completed".to_string());
+                    self.send_event(RallyEvent::AgentToolResult(name.clone(), result_summary))
+                        .await;
+                }
+            }
+            _ => {}
+        }
     }
 
     async fn continue_session(&self, session_id: &str, message: &str) -> Result<ClaudeResponse> {
@@ -139,11 +267,19 @@ impl AgentAdapter for ClaudeAdapter {
         "claude"
     }
 
+    fn set_event_sender(&mut self, sender: mpsc::Sender<RallyEvent>) {
+        self.event_sender = Some(sender);
+    }
+
     async fn run_reviewer(&mut self, prompt: &str, context: &Context) -> Result<ReviewerOutput> {
-        let allowed_tools = "Read,Glob,Grep,Bash(gh pr:*),Bash(gh api:*)";
+        // Reviewer tools: read-only operations for code review
+        // - Read/Glob/Grep: File reading and searching
+        // - gh pr view/diff/checks: View PR information
+        // - gh api (GET only): Read-only API calls
+        let allowed_tools = "Read,Glob,Grep,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr checks:*),Bash(gh api repos:*)";
 
         let response = self
-            .run_claude(
+            .run_claude_streaming(
                 prompt,
                 REVIEWER_SCHEMA,
                 allowed_tools,
@@ -158,10 +294,36 @@ impl AgentAdapter for ClaudeAdapter {
     }
 
     async fn run_reviewee(&mut self, prompt: &str, context: &Context) -> Result<RevieweeOutput> {
-        let allowed_tools = "Read,Edit,Write,Glob,Grep,Bash(git:*),Bash(gh:*),Bash(cargo:*),Bash(npm:*),Bash(pnpm:*),Bash(bun:*)";
+        // Reviewee tools: file editing and safe build/test commands
+        // Explicitly list safe subcommands to prevent dangerous operations like:
+        // - git push --force, git reset --hard
+        // - git checkout -- . (discards all changes)
+        // - git restore . (discards all changes)
+        // - npm publish, pnpm publish, bun publish
+        // - cargo publish
+        let allowed_tools = concat!(
+            "Read,Edit,Write,Glob,Grep,",
+            // Git: safe local operations only (no push, no destructive operations)
+            // Note: git checkout and git restore are excluded because they can discard changes
+            // (e.g., "git checkout -- ." or "git restore ."). Use git switch for branch operations.
+            "Bash(git status:*),Bash(git diff:*),Bash(git add:*),Bash(git commit:*),",
+            "Bash(git log:*),Bash(git show:*),Bash(git branch:*),Bash(git switch:*),",
+            "Bash(git stash:*),",
+            // GitHub CLI: PR operations only (no repo admin)
+            "Bash(gh pr:*),Bash(gh api repos:*),",
+            // Cargo: build, test, check, clippy, fmt (no publish)
+            "Bash(cargo build:*),Bash(cargo test:*),Bash(cargo check:*),",
+            "Bash(cargo clippy:*),Bash(cargo fmt:*),Bash(cargo run:*),",
+            // npm: install, test, build, run (no publish)
+            "Bash(npm install:*),Bash(npm test:*),Bash(npm run:*),Bash(npm ci:*),",
+            // pnpm: install, test, build, run (no publish)
+            "Bash(pnpm install:*),Bash(pnpm test:*),Bash(pnpm run:*),",
+            // bun: install, test, build, run (no publish)
+            "Bash(bun install:*),Bash(bun test:*),Bash(bun run:*)"
+        );
 
         let response = self
-            .run_claude(
+            .run_claude_streaming(
                 prompt,
                 REVIEWEE_SCHEMA,
                 allowed_tools,
@@ -196,6 +358,70 @@ impl AgentAdapter for ClaudeAdapter {
         let response = self.continue_session(&session_id, message).await?;
         parse_reviewee_output(&response)
     }
+}
+
+/// Stream event from Claude CLI stream-json output
+#[derive(Debug, Deserialize)]
+struct StreamEvent {
+    #[serde(rename = "type")]
+    event_type: String,
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    message: Option<StreamMessage>,
+    #[serde(default)]
+    content_block: Option<ContentBlock>,
+    #[serde(default)]
+    delta: Option<Delta>,
+    #[serde(default)]
+    tool_name: Option<String>,
+    #[serde(default)]
+    tool_input: Option<serde_json::Value>,
+    #[serde(default)]
+    tool_result: Option<String>,
+    #[serde(default)]
+    result: Option<serde_json::Value>,
+    /// structured_output is used when --json-schema is specified
+    #[serde(default)]
+    structured_output: Option<serde_json::Value>,
+    #[serde(default)]
+    cost_usd: Option<f64>,
+    #[serde(default)]
+    duration_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StreamMessage {
+    #[serde(default)]
+    content: Vec<MessageContent>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MessageContent {
+    #[serde(rename = "type")]
+    content_type: String,
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    thinking: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ContentBlock {
+    #[serde(rename = "type")]
+    block_type: String,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Delta {
+    #[serde(rename = "type")]
+    delta_type: String,
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    thinking: Option<String>,
 }
 
 /// Claude Code JSON output format
@@ -321,4 +547,33 @@ fn parse_reviewee_output(response: &ClaudeResponse) -> Result<RevieweeOutput> {
         permission_request,
         error_details: raw.error_details,
     })
+}
+
+/// Summarize JSON value for display
+fn summarize_json(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Object(map) => {
+            let keys: Vec<_> = map.keys().take(3).cloned().collect();
+            if keys.is_empty() {
+                "{}".to_string()
+            } else {
+                format!("{{{}: ...}}", keys.join(", "))
+            }
+        }
+        serde_json::Value::String(s) => summarize_text(s),
+        serde_json::Value::Array(arr) => format!("[{} items]", arr.len()),
+        _ => value.to_string(),
+    }
+}
+
+/// Summarize text for display (UTF-8 safe)
+fn summarize_text(s: &str) -> String {
+    let s = s.trim();
+    let char_count = s.chars().count();
+    if char_count <= 60 {
+        s.to_string()
+    } else {
+        let truncated: String = s.chars().take(57).collect();
+        format!("{}...", truncated)
+    }
 }
