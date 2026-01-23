@@ -90,6 +90,7 @@ This creates:
 | `r` | Request changes |
 | `c` | Comment only |
 | `C` | View review comments |
+| `R` | Force refresh (ignore cache) |
 | `A` | Start AI Rally |
 | `?` | Toggle help |
 | `q` | Quit |
