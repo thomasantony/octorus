@@ -398,8 +398,12 @@ impl Orchestrator {
                     format!("{}\n\nFiles modified: {}", f.summary, files)
                 })
                 .unwrap_or_else(|| "No changes recorded".to_string());
-            self.prompt_loader
-                .load_rereview_prompt(context, iteration, &changes_summary, &updated_diff)
+            self.prompt_loader.load_rereview_prompt(
+                context,
+                iteration,
+                &changes_summary,
+                &updated_diff,
+            )
         };
 
         let duration = Duration::from_secs(self.config.timeout_secs);
