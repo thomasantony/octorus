@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -86,9 +84,14 @@ pub struct RevieweeOutput {
 }
 
 /// Trait for agent adapters
+///
+/// NOTE: async-trait is required because native async fn in traits are not dyn-compatible
+/// (cannot be used with Box<dyn Trait>). This is needed for runtime polymorphism between
+/// different agent implementations (Claude, Codex, Gemini, etc.).
 #[async_trait]
 pub trait AgentAdapter: Send + Sync {
     /// Agent name (claude, codex, gemini, etc.)
+    #[allow(dead_code)]
     fn name(&self) -> &str;
 
     /// Set event sender for streaming events
@@ -101,9 +104,11 @@ pub trait AgentAdapter: Send + Sync {
     async fn run_reviewee(&mut self, prompt: &str, context: &Context) -> Result<RevieweeOutput>;
 
     /// Continue reviewer session (for clarification answers)
+    #[allow(dead_code)]
     async fn continue_reviewer(&mut self, message: &str) -> Result<ReviewerOutput>;
 
     /// Continue reviewee session (for permission grants or clarification answers)
+    #[allow(dead_code)]
     async fn continue_reviewee(&mut self, message: &str) -> Result<RevieweeOutput>;
 }
 
@@ -125,6 +130,7 @@ impl SupportedAgent {
         }
     }
 
+    #[allow(dead_code)]
     pub fn name(&self) -> &'static str {
         match self {
             Self::Claude => "claude",

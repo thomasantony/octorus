@@ -265,6 +265,9 @@ pub fn write_discussion_comment_cache(
     };
 
     let content = serde_json::to_string_pretty(&entry)?;
-    std::fs::write(discussion_comment_cache_file_path(repo, pr_number)?, content)?;
+    std::fs::write(
+        discussion_comment_cache_file_path(repo, pr_number)?,
+        content,
+    )?;
     Ok(())
 }

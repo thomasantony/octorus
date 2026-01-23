@@ -1,16 +1,24 @@
-#![allow(dead_code)]
-
 use crate::ai::adapter::{Context, ReviewerOutput};
 
 /// Build the initial reviewer prompt
-pub fn build_reviewer_prompt(context: &Context, iteration: u32) -> String {
+///
+/// If `custom_prompt` is provided, it will be prepended to the default prompt.
+pub fn build_reviewer_prompt(
+    context: &Context,
+    iteration: u32,
+    custom_prompt: Option<&str>,
+) -> String {
     let pr_body = context
         .pr_body
         .as_deref()
         .unwrap_or("(No description provided)");
 
+    let custom_section = custom_prompt
+        .map(|p| format!("## Custom Instructions\n\n{}\n\n", p))
+        .unwrap_or_default();
+
     format!(
-        r#"You are a code reviewer for a GitHub Pull Request.
+        r#"{custom_section}You are a code reviewer for a GitHub Pull Request.
 
 ## Context
 
@@ -49,6 +57,7 @@ This is iteration {iteration} of the review process.
 
 You MUST respond with a JSON object matching the schema provided.
 Be specific in your comments with file paths and line numbers."#,
+        custom_section = custom_section,
         repo = context.repo,
         pr_number = context.pr_number,
         pr_title = context.pr_title,
@@ -59,7 +68,14 @@ Be specific in your comments with file paths and line numbers."#,
 }
 
 /// Build the reviewee prompt based on review feedback
-pub fn build_reviewee_prompt(context: &Context, review: &ReviewerOutput, iteration: u32) -> String {
+///
+/// If `custom_prompt` is provided, it will be prepended to the default prompt.
+pub fn build_reviewee_prompt(
+    context: &Context,
+    review: &ReviewerOutput,
+    iteration: u32,
+    custom_prompt: Option<&str>,
+) -> String {
     let comments_text = review
         .comments
         .iter()
@@ -86,8 +102,12 @@ pub fn build_reviewee_prompt(context: &Context, review: &ReviewerOutput, iterati
             .join("\n")
     };
 
+    let custom_section = custom_prompt
+        .map(|p| format!("## Custom Instructions\n\n{}\n\n", p))
+        .unwrap_or_default();
+
     format!(
-        r#"You are a developer fixing code based on review feedback.
+        r#"{custom_section}You are a developer fixing code based on review feedback.
 
 ## Context
 
@@ -118,6 +138,7 @@ PR #{pr_number}: {pr_title}
 
 You MUST respond with a JSON object matching the schema provided.
 List all files you modified in the "files_modified" array."#,
+        custom_section = custom_section,
         repo = context.repo,
         pr_number = context.pr_number,
         pr_title = context.pr_title,
@@ -130,6 +151,7 @@ List all files you modified in the "files_modified" array."#,
 }
 
 /// Build a prompt for asking the reviewer a clarification question
+#[allow(dead_code)]
 pub fn build_clarification_prompt(question: &str) -> String {
     format!(
         r#"The developer has a question about your review feedback:
@@ -144,6 +166,7 @@ After answering, provide an updated review if needed."#,
 }
 
 /// Build a prompt for continuing after permission is granted
+#[allow(dead_code)]
 pub fn build_permission_granted_prompt(action: &str) -> String {
     format!(
         r#"Permission has been granted for the following action:
@@ -202,11 +225,17 @@ mod tests {
             working_dir: None,
         };
 
-        let prompt = build_reviewer_prompt(&context, 1);
+        let prompt = build_reviewer_prompt(&context, 1, None);
         assert!(prompt.contains("owner/repo"));
         assert!(prompt.contains("PR #123"));
         assert!(prompt.contains("Add feature"));
         assert!(prompt.contains("iteration 1"));
+
+        // Test with custom prompt
+        let prompt_with_custom =
+            build_reviewer_prompt(&context, 1, Some("Focus on security issues"));
+        assert!(prompt_with_custom.contains("Focus on security issues"));
+        assert!(prompt_with_custom.contains("Custom Instructions"));
     }
 
     #[test]
@@ -232,9 +261,19 @@ mod tests {
             blocking_issues: vec!["Fix error handling".to_string()],
         };
 
-        let prompt = build_reviewee_prompt(&context, &review, 1);
+        let prompt = build_reviewee_prompt(&context, &review, 1, None);
         assert!(prompt.contains("src/main.rs:10"));
         assert!(prompt.contains("Missing error handling"));
         assert!(prompt.contains("Fix error handling"));
+
+        // Test with custom prompt
+        let prompt_with_custom = build_reviewee_prompt(
+            &context,
+            &review,
+            1,
+            Some("Run cargo fmt before committing"),
+        );
+        assert!(prompt_with_custom.contains("Run cargo fmt before committing"));
+        assert!(prompt_with_custom.contains("Custom Instructions"));
     }
 }

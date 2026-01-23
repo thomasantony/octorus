@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -19,6 +17,7 @@ pub struct RallySession {
     pub updated_at: String,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RallyContext {
     pub pr_title: String,
@@ -59,6 +58,7 @@ pub fn session_path(repo: &str, pr_number: u32) -> Result<PathBuf> {
     Ok(rally_dir(repo, pr_number)?.join("session.json"))
 }
 
+#[allow(dead_code)]
 pub fn context_path(repo: &str, pr_number: u32) -> Result<PathBuf> {
     Ok(rally_dir(repo, pr_number)?.join("context.json"))
 }
@@ -67,10 +67,12 @@ pub fn history_dir(repo: &str, pr_number: u32) -> Result<PathBuf> {
     Ok(rally_dir(repo, pr_number)?.join("history"))
 }
 
+#[allow(dead_code)]
 pub fn logs_dir(repo: &str, pr_number: u32) -> Result<PathBuf> {
     Ok(rally_dir(repo, pr_number)?.join("logs"))
 }
 
+#[allow(dead_code)]
 pub fn read_session(repo: &str, pr_number: u32) -> Result<Option<RallySession>> {
     let path = session_path(repo, pr_number)?;
     if !path.exists() {
@@ -97,6 +99,7 @@ pub fn write_session(session: &RallySession) -> Result<()> {
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn read_context(repo: &str, pr_number: u32) -> Result<Option<RallyContext>> {
     let path = context_path(repo, pr_number)?;
     if !path.exists() {
@@ -108,6 +111,7 @@ pub fn read_context(repo: &str, pr_number: u32) -> Result<Option<RallyContext>> 
     Ok(Some(context))
 }
 
+#[allow(dead_code)]
 pub fn write_context(repo: &str, pr_number: u32, context: &RallyContext) -> Result<()> {
     let dir = rally_dir(repo, pr_number)?;
     fs::create_dir_all(&dir).context("Failed to create rally directory")?;
@@ -149,6 +153,7 @@ pub fn write_history_entry(
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn read_history(repo: &str, pr_number: u32) -> Result<Vec<RallyHistoryEntry>> {
     let dir = history_dir(repo, pr_number)?;
     if !dir.exists() {
@@ -171,6 +176,7 @@ pub fn read_history(repo: &str, pr_number: u32) -> Result<Vec<RallyHistoryEntry>
     Ok(entries)
 }
 
+#[allow(dead_code)]
 pub fn append_log(repo: &str, pr_number: u32, log_type: &str, message: &str) -> Result<()> {
     let dir = logs_dir(repo, pr_number)?;
     fs::create_dir_all(&dir).context("Failed to create logs directory")?;
@@ -189,6 +195,7 @@ pub fn append_log(repo: &str, pr_number: u32, log_type: &str, message: &str) -> 
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn cleanup_session(repo: &str, pr_number: u32) -> Result<()> {
     let dir = rally_dir(repo, pr_number)?;
     if dir.exists() {

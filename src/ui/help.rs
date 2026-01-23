@@ -87,6 +87,10 @@ pub fn render(frame: &mut Frame, _app: &App) {
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         )]),
+        Line::from(vec![Span::styled(
+            "  (When AI requests permission or clarification)",
+            Style::default().fg(Color::DarkGray),
+        )]),
         Line::from("  y               Grant permission / Answer yes"),
         Line::from("  n               Deny permission / Skip"),
         Line::from("  q               Abort rally"),

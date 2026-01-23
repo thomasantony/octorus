@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -32,6 +30,7 @@ pub enum RallyState {
 
 /// Event emitted during rally for TUI updates
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum RallyEvent {
     StateChanged(RallyState),
     IterationStarted(u32),
@@ -51,6 +50,7 @@ pub enum RallyEvent {
 
 /// Result of the rally process
 #[derive(Debug)]
+#[allow(dead_code)]
 pub enum RallyResult {
     Approved { iteration: u32, summary: String },
     MaxIterationsReached { iteration: u32 },
@@ -264,6 +264,7 @@ impl Orchestrator {
     }
 
     /// Continue after clarification answer
+    #[allow(dead_code)]
     pub async fn continue_with_clarification(&mut self, answer: &str) -> Result<()> {
         // Ask reviewer for clarification
         let prompt = build_clarification_prompt(answer);
@@ -279,6 +280,7 @@ impl Orchestrator {
     }
 
     /// Continue after permission granted
+    #[allow(dead_code)]
     pub async fn continue_with_permission(&mut self, action: &str) -> Result<()> {
         let prompt = build_permission_granted_prompt(action);
         self.reviewee_adapter.continue_reviewee(&prompt).await?;
@@ -294,8 +296,9 @@ impl Orchestrator {
         context: &Context,
         iteration: u32,
     ) -> Result<ReviewerOutput> {
+        let custom_prompt = self.config.reviewer_prompt.as_deref();
         let prompt = if iteration == 1 {
-            build_reviewer_prompt(context, iteration)
+            build_reviewer_prompt(context, iteration, custom_prompt)
         } else {
             // Re-review after fixes - use the fix result summary and files modified
             let changes_summary = self
@@ -334,7 +337,8 @@ impl Orchestrator {
         review: &ReviewerOutput,
         iteration: u32,
     ) -> Result<RevieweeOutput> {
-        let prompt = build_reviewee_prompt(context, review, iteration);
+        let custom_prompt = self.config.reviewee_prompt.as_deref();
+        let prompt = build_reviewee_prompt(context, review, iteration, custom_prompt);
         let duration = Duration::from_secs(self.config.timeout_secs);
 
         timeout(
@@ -354,6 +358,7 @@ impl Orchestrator {
         let _ = self.event_sender.send(event).await;
     }
 
+    #[allow(dead_code)]
     pub fn session(&self) -> &RallySession {
         &self.session
     }

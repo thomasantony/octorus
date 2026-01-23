@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use anyhow::{anyhow, Context as AnyhowContext, Result};
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -232,6 +230,7 @@ impl ClaudeAdapter {
         }
     }
 
+    #[allow(dead_code)]
     async fn continue_session(&self, session_id: &str, message: &str) -> Result<ClaudeResponse> {
         let mut cmd = Command::new("claude");
         cmd.arg("-p").arg(message);
@@ -431,8 +430,10 @@ struct ClaudeResponse {
     #[serde(default)]
     result: Option<serde_json::Value>,
     #[serde(default)]
+    #[allow(dead_code)]
     cost_usd: Option<f64>,
     #[serde(default)]
+    #[allow(dead_code)]
     duration_ms: Option<u64>,
 }
 
