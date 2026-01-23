@@ -3,7 +3,8 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{
-        Block, Borders, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
+        Block, Borders, Clear, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation,
+        ScrollbarState, Wrap,
     },
     Frame,
 };
@@ -28,6 +29,11 @@ pub fn render(frame: &mut Frame, app: &App) {
     render_header(frame, chunks[0], rally_state);
     render_main_content(frame, chunks[1], rally_state);
     render_status_bar(frame, chunks[2], rally_state);
+
+    // Render modal on top if showing log detail
+    if rally_state.showing_log_detail {
+        render_log_detail_modal(frame, rally_state);
+    }
 }
 
 fn render_header(frame: &mut Frame, area: Rect, state: &AiRallyState) {
@@ -191,15 +197,19 @@ fn render_logs(frame: &mut Frame, area: Rect, state: &AiRallyState) {
     let items: Vec<ListItem> = state
         .logs
         .iter()
+        .enumerate()
         .skip(scroll_offset)
         .take(visible_height)
-        .map(|entry| format_log_entry(entry))
+        .map(|(idx, entry)| {
+            let is_selected = state.selected_log_index == Some(idx);
+            format_log_entry(entry, is_selected)
+        })
         .collect();
 
     let block = Block::default()
         .borders(Borders::ALL)
         .title(format!(
-            " Logs ({}/{}) [↑↓ scroll] ",
+            " Logs ({}/{}) [↑↓ select, Enter: detail] ",
             scroll_offset.saturating_add(visible_height).min(total_logs),
             total_logs
         ))
@@ -231,7 +241,7 @@ fn render_logs(frame: &mut Frame, area: Rect, state: &AiRallyState) {
     }
 }
 
-fn format_log_entry(entry: &LogEntry) -> ListItem<'static> {
+fn format_log_entry(entry: &LogEntry, is_selected: bool) -> ListItem<'static> {
     // Use ASCII characters for better terminal compatibility
     // Some terminals may not render emojis correctly
     let (icon, color) = match entry.event_type {
@@ -256,7 +266,16 @@ fn format_log_entry(entry: &LogEntry) -> ListItem<'static> {
         LogEventType::Error => "Error",
     };
 
-    ListItem::new(Line::from(vec![
+    // Selection indicator
+    let selector = if is_selected { ">" } else { " " };
+
+    let mut item = ListItem::new(Line::from(vec![
+        Span::styled(
+            selector.to_string(),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled(
             format!("[{}] ", entry.timestamp),
             Style::default().fg(Color::DarkGray),
@@ -267,16 +286,81 @@ fn format_log_entry(entry: &LogEntry) -> ListItem<'static> {
             Style::default().fg(color).add_modifier(Modifier::BOLD),
         ),
         Span::styled(entry.message.clone(), Style::default().fg(Color::White)),
-    ]))
+    ]));
+
+    // Highlight selected row
+    if is_selected {
+        item = item.style(Style::default().bg(Color::DarkGray));
+    }
+
+    item
+}
+
+fn render_log_detail_modal(frame: &mut Frame, state: &AiRallyState) {
+    let Some(selected_idx) = state.selected_log_index else {
+        return;
+    };
+
+    let Some(entry) = state.logs.get(selected_idx) else {
+        return;
+    };
+
+    // Calculate modal area (centered, 80% width, 60% height)
+    let area = frame.area();
+    let modal_width = (area.width as f32 * 0.8) as u16;
+    let modal_height = (area.height as f32 * 0.6) as u16;
+    let modal_x = (area.width.saturating_sub(modal_width)) / 2;
+    let modal_y = (area.height.saturating_sub(modal_height)) / 2;
+
+    let modal_area = Rect::new(modal_x, modal_y, modal_width, modal_height);
+
+    // Clear the area behind the modal
+    frame.render_widget(Clear, modal_area);
+
+    // Get type label and color
+    let (type_label, color) = match entry.event_type {
+        LogEventType::Info => ("Info", Color::Blue),
+        LogEventType::Thinking => ("Thinking", Color::Magenta),
+        LogEventType::ToolUse => ("Tool Use", Color::Cyan),
+        LogEventType::ToolResult => ("Tool Result", Color::Green),
+        LogEventType::Text => ("Output", Color::White),
+        LogEventType::Review => ("Review", Color::Yellow),
+        LogEventType::Fix => ("Fix", Color::Cyan),
+        LogEventType::Error => ("Error", Color::Red),
+    };
+
+    let title = format!(" {} - {} ", type_label, entry.timestamp);
+
+    // Build content with word wrap
+    let content = Paragraph::new(entry.message.clone())
+        .wrap(Wrap { trim: false })
+        .style(Style::default().fg(Color::White))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(title)
+                .title_bottom(Line::from(" Press Esc/Enter/q to close ").centered())
+                .border_style(Style::default().fg(color)),
+        );
+
+    frame.render_widget(content, modal_area);
 }
 
 fn render_status_bar(frame: &mut Frame, area: Rect, state: &AiRallyState) {
-    let help_text = match state.state {
-        RallyState::WaitingForClarification => "y: Answer | n: Skip | ↑↓: Scroll logs | q: Abort",
-        RallyState::WaitingForPermission => "y: Grant | n: Deny | ↑↓: Scroll logs | q: Abort",
-        RallyState::Completed => "↑↓: Scroll logs | q: Close",
-        RallyState::Error => "r: Retry | ↑↓: Scroll logs | q: Close",
-        _ => "↑↓: Scroll logs | q: Abort",
+    let help_text = if state.showing_log_detail {
+        "Esc/Enter/q: Close detail"
+    } else {
+        match state.state {
+            RallyState::WaitingForClarification => {
+                "y: Answer | n: Skip | ↑↓: Select | Enter: Detail | q: Abort"
+            }
+            RallyState::WaitingForPermission => {
+                "y: Grant | n: Deny | ↑↓: Select | Enter: Detail | q: Abort"
+            }
+            RallyState::Completed => "↑↓: Select | Enter: Detail | q: Close",
+            RallyState::Error => "r: Retry | ↑↓: Select | Enter: Detail | q: Close",
+            _ => "↑↓: Select | Enter: Detail | q: Abort",
+        }
     };
 
     let status_bar = Paragraph::new(Line::from(vec![Span::styled(

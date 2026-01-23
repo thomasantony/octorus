@@ -65,6 +65,10 @@ pub struct AiRallyState {
     pub history: Vec<RallyEvent>,
     pub logs: Vec<LogEntry>,
     pub log_scroll_offset: usize,
+    /// Selected log index for detail view
+    pub selected_log_index: Option<usize>,
+    /// Whether the log detail modal is visible
+    pub showing_log_detail: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -585,8 +589,21 @@ impl App {
     }
 
     fn handle_ai_rally_input(&mut self, key: event::KeyEvent) -> Result<()> {
+        // Handle modal state first
+        if let Some(ref mut rally_state) = self.ai_rally_state {
+            if rally_state.showing_log_detail {
+                match key.code {
+                    KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
+                        rally_state.showing_log_detail = false;
+                    }
+                    _ => {}
+                }
+                return Ok(());
+            }
+        }
+
         match key.code {
-            KeyCode::Char('q') => {
+            KeyCode::Char('q') | KeyCode::Esc => {
                 // Abort the orchestrator task if running
                 if let Some(handle) = self.rally_abort_handle.take() {
                     handle.abort();
@@ -648,45 +665,100 @@ impl App {
                     }
                 }
             }
-            // Log scrolling
+            // Log selection and scrolling
             KeyCode::Char('j') | KeyCode::Down => {
                 if let Some(ref mut rally_state) = self.ai_rally_state {
                     let total_logs = rally_state.logs.len();
-                    if rally_state.log_scroll_offset == 0 {
-                        // Start from current auto-scroll position
-                        rally_state.log_scroll_offset = total_logs.saturating_sub(10);
+                    if total_logs == 0 {
+                        return Ok(());
                     }
-                    rally_state.log_scroll_offset = rally_state
-                        .log_scroll_offset
-                        .saturating_add(1)
-                        .min(total_logs.saturating_sub(1));
+
+                    // Initialize selection if not set
+                    let current = rally_state.selected_log_index.unwrap_or(0);
+                    let new_index = (current + 1).min(total_logs.saturating_sub(1));
+                    rally_state.selected_log_index = Some(new_index);
+
+                    // Auto-scroll to keep selection visible
+                    self.adjust_log_scroll_to_selection();
                 }
             }
             KeyCode::Char('k') | KeyCode::Up => {
                 if let Some(ref mut rally_state) = self.ai_rally_state {
-                    if rally_state.log_scroll_offset == 0 {
-                        // Start from current auto-scroll position
-                        let total_logs = rally_state.logs.len();
-                        rally_state.log_scroll_offset = total_logs.saturating_sub(10);
+                    let total_logs = rally_state.logs.len();
+                    if total_logs == 0 {
+                        return Ok(());
                     }
-                    rally_state.log_scroll_offset = rally_state.log_scroll_offset.saturating_sub(1);
+
+                    // Initialize selection if not set (start from last)
+                    let current = rally_state
+                        .selected_log_index
+                        .unwrap_or(total_logs.saturating_sub(1));
+                    let new_index = current.saturating_sub(1);
+                    rally_state.selected_log_index = Some(new_index);
+
+                    // Auto-scroll to keep selection visible
+                    self.adjust_log_scroll_to_selection();
+                }
+            }
+            KeyCode::Enter => {
+                // Show log detail modal
+                if let Some(ref mut rally_state) = self.ai_rally_state {
+                    if rally_state.selected_log_index.is_some() && !rally_state.logs.is_empty() {
+                        rally_state.showing_log_detail = true;
+                    }
                 }
             }
             KeyCode::Char('G') => {
-                // Jump to bottom (reset auto-scroll)
+                // Jump to bottom
                 if let Some(ref mut rally_state) = self.ai_rally_state {
-                    rally_state.log_scroll_offset = 0; // 0 means auto-scroll to bottom
+                    let total_logs = rally_state.logs.len();
+                    if total_logs > 0 {
+                        rally_state.selected_log_index = Some(total_logs.saturating_sub(1));
+                        rally_state.log_scroll_offset = 0; // 0 means auto-scroll to bottom
+                    }
                 }
             }
             KeyCode::Char('g') => {
                 // Jump to top
                 if let Some(ref mut rally_state) = self.ai_rally_state {
-                    rally_state.log_scroll_offset = 1; // 1 is minimum (not 0 which means auto-scroll)
+                    if !rally_state.logs.is_empty() {
+                        rally_state.selected_log_index = Some(0);
+                        rally_state.log_scroll_offset = 1; // 1 is minimum (not 0 which means auto-scroll)
+                    }
                 }
             }
             _ => {}
         }
         Ok(())
+    }
+
+    /// Adjust log scroll offset to keep the selected log visible
+    fn adjust_log_scroll_to_selection(&mut self) {
+        if let Some(ref mut rally_state) = self.ai_rally_state {
+            let Some(selected) = rally_state.selected_log_index else {
+                return;
+            };
+
+            // Estimate visible height (rough estimate, actual is calculated in UI)
+            let visible_height = 10_usize; // approximate
+
+            // Calculate current scroll position
+            let total_logs = rally_state.logs.len();
+            let scroll_offset = if rally_state.log_scroll_offset == 0 {
+                total_logs.saturating_sub(visible_height)
+            } else {
+                rally_state.log_scroll_offset
+            };
+
+            // Adjust scroll to keep selection visible
+            if selected < scroll_offset {
+                // Selection is above visible area
+                rally_state.log_scroll_offset = selected.max(1);
+            } else if selected >= scroll_offset + visible_height {
+                // Selection is below visible area
+                rally_state.log_scroll_offset = selected.saturating_sub(visible_height - 1).max(1);
+            }
+        }
     }
 
     fn start_ai_rally(&mut self) {
@@ -725,6 +797,8 @@ impl App {
             history: Vec::new(),
             logs: Vec::new(),
             log_scroll_offset: 0,
+            selected_log_index: None,
+            showing_log_detail: false,
         });
 
         self.state = AppState::AiRally;

@@ -424,7 +424,23 @@ impl Orchestrator {
         };
 
         // Post summary comment using gh pr review
-        github::submit_review(&self.repo, self.pr_number, app_action, &review.summary).await?;
+        // If approve fails (e.g., can't approve own PR), fall back to comment
+        let result =
+            github::submit_review(&self.repo, self.pr_number, app_action.clone(), &review.summary)
+                .await;
+
+        if result.is_err() && matches!(app_action, crate::app::ReviewAction::Approve) {
+            warn!("Approve failed, falling back to comment");
+            github::submit_review(
+                &self.repo,
+                self.pr_number,
+                crate::app::ReviewAction::Comment,
+                &review.summary,
+            )
+            .await?;
+        } else {
+            result?;
+        }
 
         // Post inline comments with rate limit handling
         for comment in &review.comments {
