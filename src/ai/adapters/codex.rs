@@ -195,6 +195,7 @@ impl CodexAdapter {
         let mut final_response: Option<CodexResponse> = None;
         let mut error_lines = Vec::new();
         let mut thread_id: Option<String> = None;
+        let mut stream_error: Option<anyhow::Error> = None;
 
         // Process NDJSON stream
         loop {
@@ -208,8 +209,16 @@ impl CodexAdapter {
                             // Parse Codex event
                             match serde_json::from_str::<CodexEvent>(&l) {
                                 Ok(event) => {
-                                    if let Some(result) = self.handle_codex_event(&event, &mut thread_id).await? {
-                                        final_response = Some(result);
+                                    match self.handle_codex_event(&event, &mut thread_id).await {
+                                        Ok(Some(result)) => {
+                                            final_response = Some(result);
+                                        }
+                                        Ok(None) => {}
+                                        Err(e) => {
+                                            // Capture error but continue to wait for process
+                                            stream_error = Some(e);
+                                            break;
+                                        }
                                     }
                                 }
                                 Err(_) => {
@@ -218,23 +227,41 @@ impl CodexAdapter {
                             }
                         }
                         Ok(None) => break,
-                        Err(e) => return Err(anyhow!("Error reading stdout: {}", e)),
+                        Err(e) => {
+                            stream_error = Some(anyhow!("Error reading stdout: {}", e));
+                            break;
+                        }
                     }
                 }
                 line = stderr_reader.next_line() => {
                     match line {
                         Ok(Some(l)) => error_lines.push(l),
                         Ok(None) => {},
-                        Err(e) => return Err(anyhow!("Error reading stderr: {}", e)),
+                        Err(e) => {
+                            stream_error = Some(anyhow!("Error reading stderr: {}", e));
+                            break;
+                        }
                     }
                 }
             }
         }
 
-        let status = child
-            .wait()
-            .await
-            .context("Failed to wait for codex process")?;
+        // Always wait for the child process to terminate before returning
+        // This ensures we don't leave zombie processes and the temp schema file
+        // is only deleted after the process has finished
+        let status = match child.wait().await {
+            Ok(s) => s,
+            Err(e) => {
+                // If wait fails, try to kill the process
+                let _ = child.kill().await;
+                return Err(anyhow!("Failed to wait for codex process: {}", e));
+            }
+        };
+
+        // Now that child has terminated, return any captured stream error
+        if let Some(e) = stream_error {
+            return Err(e);
+        }
 
         // schema_file is dropped here and the temporary file is deleted
 
