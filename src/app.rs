@@ -1,6 +1,10 @@
+use std::collections::hash_map::DefaultHasher;
+use std::collections::HashSet;
+use std::hash::{Hash, Hasher};
+
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
-use ratatui::{backend::CrosstermBackend, Terminal};
+use ratatui::{backend::CrosstermBackend, text::Span, Terminal};
 use std::io::Stdout;
 use tokio::sync::mpsc;
 use tokio::task::AbortHandle;
@@ -12,6 +16,39 @@ use crate::github::comment::{DiscussionComment, ReviewComment};
 use crate::github::{self, ChangedFile, PullRequest};
 use crate::loader::DataLoadResult;
 use crate::ui;
+
+/// コメントのdiff内位置を表す構造体
+#[derive(Debug, Clone)]
+pub struct CommentPosition {
+    pub diff_line_index: usize,
+    pub comment_index: usize,
+}
+
+/// Diff行のキャッシュ（シンタックスハイライト済み）
+#[derive(Clone)]
+pub struct CachedDiffLine {
+    /// 基本の Span（REVERSED なし）
+    pub spans: Vec<Span<'static>>,
+}
+
+/// Diff表示のキャッシュ
+pub struct DiffCache {
+    /// キャッシュ対象のファイルインデックス
+    pub file_index: usize,
+    /// patch のハッシュ（変更検出用）
+    pub patch_hash: u64,
+    /// コメント行のセット（キャッシュ無効化判定用）
+    pub comment_lines: HashSet<usize>,
+    /// パース済みの行データ
+    pub lines: Vec<CachedDiffLine>,
+}
+
+/// 文字列のハッシュを計算
+fn hash_string(s: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    s.hash(&mut hasher);
+    hasher.finish()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AppState {
@@ -137,6 +174,12 @@ pub struct App {
     pub selected_comment: usize,
     pub comment_list_scroll_offset: usize,
     pub comments_loading: bool,
+    // Comment positions in current diff view
+    pub file_comment_positions: Vec<CommentPosition>,
+    // Set of diff line indices with comments (for fast lookup in render)
+    pub file_comment_lines: HashSet<usize>,
+    // Cached diff lines (syntax highlighted)
+    pub diff_cache: Option<DiffCache>,
     // Discussion comments (PR conversation)
     pub discussion_comments: Option<Vec<DiscussionComment>>,
     pub selected_discussion_comment: usize,
@@ -188,6 +231,9 @@ impl App {
             selected_comment: 0,
             comment_list_scroll_offset: 0,
             comments_loading: false,
+            file_comment_positions: vec![],
+            file_comment_lines: HashSet::new(),
+            diff_cache: None,
             discussion_comments: None,
             selected_discussion_comment: 0,
             discussion_comments_loading: false,
@@ -240,6 +286,9 @@ impl App {
             selected_comment: 0,
             comment_list_scroll_offset: 0,
             comments_loading: false,
+            file_comment_positions: vec![],
+            file_comment_lines: HashSet::new(),
+            diff_cache: None,
             discussion_comments: None,
             selected_discussion_comment: 0,
             discussion_comments_loading: false,
@@ -329,6 +378,11 @@ impl App {
                 self.comment_list_scroll_offset = 0;
                 self.comments_loading = false;
                 self.comment_receiver = None;
+                // Update comment positions if in diff view
+                if self.state == AppState::DiffView {
+                    self.update_file_comment_positions();
+                    self.ensure_diff_cache();
+                }
             }
             Ok(Err(e)) => {
                 eprintln!("Warning: Failed to fetch comments: {}", e);
@@ -601,6 +655,8 @@ impl App {
                     self.selected_line = 0;
                     self.scroll_offset = 0;
                     self.update_diff_line_count();
+                    self.update_file_comment_positions();
+                    self.ensure_diff_cache();
                 }
             }
             KeyCode::Char(c) if c == self.config.keybindings.approve => {
@@ -1077,6 +1133,8 @@ impl App {
             KeyCode::Char(c) if c == self.config.keybindings.suggestion => {
                 self.open_suggestion_editor(terminal).await?
             }
+            KeyCode::Char('n') => self.jump_to_next_comment(),
+            KeyCode::Char('N') => self.jump_to_prev_comment(),
             _ => {}
         }
         Ok(())
@@ -1570,7 +1628,6 @@ impl App {
         };
 
         let target_path = &comment.path;
-        let target_line = comment.line;
 
         // Find file index by path
         let file_index = self.files().iter().position(|f| &f.filename == target_path);
@@ -1581,25 +1638,63 @@ impl App {
             self.selected_line = 0;
             self.scroll_offset = 0;
             self.update_diff_line_count();
+            self.update_file_comment_positions();
+            self.ensure_diff_cache();
 
-            // Try to scroll to the target line in the diff
-            if let Some(line_num) = target_line {
-                if let Some(file) = self.files().get(idx) {
-                    if let Some(patch) = file.patch.as_ref() {
-                        if let Some(diff_line_index) =
-                            self.find_diff_line_for_new_line(patch, line_num)
-                        {
-                            self.selected_line = diff_line_index;
-                            // Center the line in view
-                            self.scroll_offset = diff_line_index.saturating_sub(10);
-                        }
-                    }
-                }
+            // Find diff line index from pre-computed positions
+            let diff_line_index = self
+                .file_comment_positions
+                .iter()
+                .find(|pos| pos.comment_index == self.selected_comment)
+                .map(|pos| pos.diff_line_index);
+
+            if let Some(line_idx) = diff_line_index {
+                self.selected_line = line_idx;
+                self.scroll_offset = line_idx;
             }
         }
     }
 
-    fn find_diff_line_for_new_line(&self, patch: &str, target_line: u32) -> Option<usize> {
+    /// Update file_comment_positions based on current file and review_comments
+    fn update_file_comment_positions(&mut self) {
+        self.file_comment_positions.clear();
+        self.file_comment_lines.clear();
+
+        let Some(file) = self.files().get(self.selected_file) else {
+            return;
+        };
+        let Some(patch) = file.patch.clone() else {
+            return;
+        };
+        let filename = file.filename.clone();
+
+        let Some(ref comments) = self.review_comments else {
+            return;
+        };
+
+        for (i, comment) in comments.iter().enumerate() {
+            // Skip comments for other files
+            if comment.path != filename {
+                continue;
+            }
+            // Skip PR-level comments (line: None)
+            let Some(line_num) = comment.line else {
+                continue;
+            };
+            if let Some(diff_index) = Self::find_diff_line_index(&patch, line_num) {
+                self.file_comment_positions.push(CommentPosition {
+                    diff_line_index: diff_index,
+                    comment_index: i,
+                });
+                self.file_comment_lines.insert(diff_index);
+            }
+        }
+        self.file_comment_positions
+            .sort_by_key(|pos| pos.diff_line_index);
+    }
+
+    /// Static helper to find diff line index for a given line number
+    fn find_diff_line_index(patch: &str, target_line: u32) -> Option<usize> {
         let lines: Vec<&str> = patch.lines().collect();
         let mut new_line_number: Option<u32> = None;
 
@@ -1625,5 +1720,301 @@ impl App {
         }
 
         None
+    }
+
+    /// Get comment indices at the current selected line
+    pub fn get_comment_indices_at_current_line(&self) -> Vec<usize> {
+        self.file_comment_positions
+            .iter()
+            .filter(|pos| pos.diff_line_index == self.selected_line)
+            .map(|pos| pos.comment_index)
+            .collect()
+    }
+
+    /// Check if current line has any comments
+    pub fn has_comment_at_current_line(&self) -> bool {
+        self.file_comment_positions
+            .iter()
+            .any(|pos| pos.diff_line_index == self.selected_line)
+    }
+
+    /// Jump to next comment in the diff (no wrap-around, scroll to top)
+    fn jump_to_next_comment(&mut self) {
+        let next = self
+            .file_comment_positions
+            .iter()
+            .find(|pos| pos.diff_line_index > self.selected_line);
+
+        if let Some(pos) = next {
+            self.selected_line = pos.diff_line_index;
+            self.scroll_offset = self.selected_line;
+        }
+    }
+
+    /// Jump to previous comment in the diff (no wrap-around, scroll to top)
+    fn jump_to_prev_comment(&mut self) {
+        let prev = self
+            .file_comment_positions
+            .iter()
+            .rev()
+            .find(|pos| pos.diff_line_index < self.selected_line);
+
+        if let Some(pos) = prev {
+            self.selected_line = pos.diff_line_index;
+            self.scroll_offset = self.selected_line;
+        }
+    }
+
+    /// Diffキャッシュを構築または再利用
+    pub fn ensure_diff_cache(&mut self) {
+        let file_index = self.selected_file;
+
+        // file_index を先に比較（O(1)）
+        if let Some(ref cache) = self.diff_cache {
+            if cache.file_index == file_index {
+                // patch hash と comment_lines を比較（clone 前に参照比較）
+                let Some(file) = self.files().get(file_index) else {
+                    self.diff_cache = None;
+                    return;
+                };
+                let Some(ref patch) = file.patch else {
+                    self.diff_cache = None;
+                    return;
+                };
+                let current_hash = hash_string(patch);
+                if cache.patch_hash == current_hash
+                    && cache.comment_lines == self.file_comment_lines
+                {
+                    return; // キャッシュ有効
+                }
+            }
+        }
+
+        // キャッシュ再構築
+        let Some(file) = self.files().get(file_index) else {
+            self.diff_cache = None;
+            return;
+        };
+        let Some(patch) = file.patch.clone() else {
+            self.diff_cache = None;
+            return;
+        };
+        let filename = file.filename.clone();
+
+        let lines = crate::ui::diff_view::build_diff_cache(
+            &patch,
+            &filename,
+            &self.config.diff.theme,
+            &self.file_comment_lines,
+        );
+
+        self.diff_cache = Some(DiffCache {
+            file_index,
+            patch_hash: hash_string(&patch),
+            comment_lines: self.file_comment_lines.clone(),
+            lines,
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_find_diff_line_index_basic() {
+        let patch = r#"@@ -1,3 +1,4 @@
+ context line
++added line
+ another context
+-removed line"#;
+
+        // Line 1 (context) is at diff index 1
+        assert_eq!(App::find_diff_line_index(patch, 1), Some(1));
+        // Line 2 (added) is at diff index 2
+        assert_eq!(App::find_diff_line_index(patch, 2), Some(2));
+        // Line 3 (context) is at diff index 3
+        assert_eq!(App::find_diff_line_index(patch, 3), Some(3));
+        // Line 5 doesn't exist in new file
+        assert_eq!(App::find_diff_line_index(patch, 5), None);
+    }
+
+    #[test]
+    fn test_find_diff_line_index_multi_hunk() {
+        let patch = r#"@@ -1,2 +1,2 @@
+ line1
++new line2
+@@ -10,2 +10,2 @@
+ line10
++new line11"#;
+
+        // First hunk: line 1 at index 1, line 2 at index 2
+        assert_eq!(App::find_diff_line_index(patch, 1), Some(1));
+        assert_eq!(App::find_diff_line_index(patch, 2), Some(2));
+        // Second hunk: line 10 at index 4, line 11 at index 5
+        assert_eq!(App::find_diff_line_index(patch, 10), Some(4));
+        assert_eq!(App::find_diff_line_index(patch, 11), Some(5));
+    }
+
+    #[test]
+    fn test_has_comment_at_current_line() {
+        let config = Config::default();
+        let (mut app, _) = App::new_loading("owner/repo", 1, config);
+        app.file_comment_positions = vec![
+            CommentPosition {
+                diff_line_index: 5,
+                comment_index: 0,
+            },
+            CommentPosition {
+                diff_line_index: 10,
+                comment_index: 1,
+            },
+        ];
+
+        app.selected_line = 5;
+        assert!(app.has_comment_at_current_line());
+
+        app.selected_line = 10;
+        assert!(app.has_comment_at_current_line());
+
+        app.selected_line = 7;
+        assert!(!app.has_comment_at_current_line());
+    }
+
+    #[test]
+    fn test_get_comment_indices_at_current_line() {
+        let config = Config::default();
+        let (mut app, _) = App::new_loading("owner/repo", 1, config);
+        // Two comments on line 5, one on line 10
+        app.file_comment_positions = vec![
+            CommentPosition {
+                diff_line_index: 5,
+                comment_index: 0,
+            },
+            CommentPosition {
+                diff_line_index: 5,
+                comment_index: 2,
+            },
+            CommentPosition {
+                diff_line_index: 10,
+                comment_index: 1,
+            },
+        ];
+
+        app.selected_line = 5;
+        let indices = app.get_comment_indices_at_current_line();
+        assert_eq!(indices, vec![0, 2]);
+
+        app.selected_line = 10;
+        let indices = app.get_comment_indices_at_current_line();
+        assert_eq!(indices, vec![1]);
+
+        app.selected_line = 7;
+        let indices = app.get_comment_indices_at_current_line();
+        assert!(indices.is_empty());
+    }
+
+    #[test]
+    fn test_jump_to_next_comment_basic() {
+        let config = Config::default();
+        let (mut app, _) = App::new_loading("owner/repo", 1, config);
+        app.file_comment_positions = vec![
+            CommentPosition {
+                diff_line_index: 5,
+                comment_index: 0,
+            },
+            CommentPosition {
+                diff_line_index: 10,
+                comment_index: 1,
+            },
+            CommentPosition {
+                diff_line_index: 15,
+                comment_index: 2,
+            },
+        ];
+
+        app.selected_line = 0;
+        app.jump_to_next_comment();
+        assert_eq!(app.selected_line, 5);
+
+        app.jump_to_next_comment();
+        assert_eq!(app.selected_line, 10);
+
+        app.jump_to_next_comment();
+        assert_eq!(app.selected_line, 15);
+    }
+
+    #[test]
+    fn test_jump_to_next_comment_no_wrap() {
+        let config = Config::default();
+        let (mut app, _) = App::new_loading("owner/repo", 1, config);
+        app.file_comment_positions = vec![CommentPosition {
+            diff_line_index: 5,
+            comment_index: 0,
+        }];
+
+        app.selected_line = 5;
+        app.jump_to_next_comment();
+        // Should stay at 5 (no wrap-around)
+        assert_eq!(app.selected_line, 5);
+    }
+
+    #[test]
+    fn test_jump_to_prev_comment_basic() {
+        let config = Config::default();
+        let (mut app, _) = App::new_loading("owner/repo", 1, config);
+        app.file_comment_positions = vec![
+            CommentPosition {
+                diff_line_index: 5,
+                comment_index: 0,
+            },
+            CommentPosition {
+                diff_line_index: 10,
+                comment_index: 1,
+            },
+            CommentPosition {
+                diff_line_index: 15,
+                comment_index: 2,
+            },
+        ];
+
+        app.selected_line = 20;
+        app.jump_to_prev_comment();
+        assert_eq!(app.selected_line, 15);
+
+        app.jump_to_prev_comment();
+        assert_eq!(app.selected_line, 10);
+
+        app.jump_to_prev_comment();
+        assert_eq!(app.selected_line, 5);
+    }
+
+    #[test]
+    fn test_jump_to_prev_comment_no_wrap() {
+        let config = Config::default();
+        let (mut app, _) = App::new_loading("owner/repo", 1, config);
+        app.file_comment_positions = vec![CommentPosition {
+            diff_line_index: 5,
+            comment_index: 0,
+        }];
+
+        app.selected_line = 5;
+        app.jump_to_prev_comment();
+        // Should stay at 5 (no wrap-around)
+        assert_eq!(app.selected_line, 5);
+    }
+
+    #[test]
+    fn test_jump_with_empty_positions() {
+        let config = Config::default();
+        let (mut app, _) = App::new_loading("owner/repo", 1, config);
+        app.file_comment_positions = vec![];
+
+        app.selected_line = 10;
+        app.jump_to_next_comment();
+        assert_eq!(app.selected_line, 10);
+
+        app.jump_to_prev_comment();
+        assert_eq!(app.selected_line, 10);
     }
 }
