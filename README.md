@@ -14,6 +14,7 @@ A TUI tool for GitHub PR review with Vim-style keybindings.
 ## Features
 
 - Browse changed files in a PR
+- Split view with file list and diff preview side by side
 - View diffs with syntax highlighting
 - Add inline comments on specific lines
 - Add code suggestions
@@ -85,7 +86,7 @@ This creates:
 |-----|--------|
 | `j` / `↓` | Move down |
 | `k` / `↑` | Move up |
-| `Enter` | Open diff view |
+| `Enter` / `→` / `l` | Open split view |
 | `a` | Approve PR |
 | `r` | Request changes |
 | `c` | Comment only |
@@ -94,6 +95,35 @@ This creates:
 | `A` | Start AI Rally |
 | `?` | Toggle help |
 | `q` | Quit |
+
+#### Split View
+
+The split view shows the file list (left, 35%) and a diff preview (right, 65%). The focused pane is highlighted with a yellow border.
+
+**File List Focus:**
+
+| Key | Action |
+|-----|--------|
+| `j` / `↓` | Move file selection (diff follows) |
+| `k` / `↑` | Move file selection (diff follows) |
+| `Enter` / `→` / `l` | Focus diff pane |
+| `←` / `h` / `q` | Back to file list |
+
+**Diff Focus:**
+
+| Key | Action |
+|-----|--------|
+| `j` / `↓` | Scroll diff |
+| `k` / `↑` | Scroll diff |
+| `Ctrl-d` | Page down |
+| `Ctrl-u` | Page up |
+| `n` | Jump to next comment |
+| `N` | Jump to previous comment |
+| `Enter` | Open fullscreen diff view |
+| `c` | Add comment at line |
+| `s` | Add suggestion at line |
+| `←` / `h` | Focus file list |
+| `q` | Back to file list |
 
 #### Diff View
 
@@ -107,7 +137,7 @@ This creates:
 | `Ctrl-u` | Page up |
 | `c` | Add comment at line |
 | `s` | Add suggestion at line |
-| `q` / `Esc` | Back to file list |
+| `q` / `Esc` | Back to previous view |
 
 **Note**: Lines with existing comments are marked with `●`. When you select a commented line, the comment content is displayed in a panel below the diff.
 
