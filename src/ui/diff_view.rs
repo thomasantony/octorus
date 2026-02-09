@@ -33,8 +33,7 @@ pub fn build_plain_diff_cache(patch: &str) -> DiffCache {
     let mut interner = Rodeo::default();
     let lines: Vec<CachedDiffLine> = patch
         .lines()
-        .enumerate()
-        .map(|(_, line)| {
+        .map(|line| {
             let (line_type, content) = classify_line(line);
 
             let spans = match line_type {
@@ -648,7 +647,12 @@ pub(crate) fn render_diff_content(frame: &mut Frame, app: &App, area: ratatui::l
 
         // Only process visible lines (with buffer) for performance
         // When visible_start >= visible_end, this produces an empty range (safe)
-        render_cached_lines(cache, visible_start..visible_end, app.selected_line, &app.file_comment_lines)
+        render_cached_lines(
+            cache,
+            visible_start..visible_end,
+            app.selected_line,
+            &app.file_comment_lines,
+        )
     } else {
         // Fallback: parse without cache (should rarely happen)
         let file = app.files().get(app.selected_file);
@@ -1180,12 +1184,7 @@ mod tests {
  }"#;
 
         let mut parser_pool = ParserPool::new();
-        let cache = build_diff_cache(
-            patch,
-            "test.rs",
-            "Dracula",
-            &mut parser_pool,
-        );
+        let cache = build_diff_cache(patch, "test.rs", "Dracula", &mut parser_pool);
 
         // Line 1 is " use std::collections::HashMap;" (Context line)
         // Find the "use" keyword span
@@ -1228,12 +1227,7 @@ mod tests {
  }"#;
 
         let mut parser_pool = ParserPool::new();
-        let cache = build_diff_cache(
-            patch,
-            "test.rs",
-            "Dracula",
-            &mut parser_pool,
-        );
+        let cache = build_diff_cache(patch, "test.rs", "Dracula", &mut parser_pool);
 
         // Line 4 is "-    let old_value = 100;" (Removed line)
         // Find the "let" keyword span - it should be syntax highlighted, not plain red
@@ -1289,12 +1283,7 @@ mod tests {
  export default oldValue;"#;
 
         let mut parser_pool = ParserPool::new();
-        let cache = build_diff_cache(
-            patch,
-            "test.ts",
-            "Dracula",
-            &mut parser_pool,
-        );
+        let cache = build_diff_cache(patch, "test.ts", "Dracula", &mut parser_pool);
 
         // Line 1 is "-const oldValue = 42;" (Removed line)
         let removed_line = &cache.lines[1];
@@ -1348,12 +1337,7 @@ mod tests {
  function increment() {"#;
 
         let mut parser_pool = ParserPool::new();
-        let cache = build_diff_cache(
-            patch,
-            "Component.vue",
-            "Dracula",
-            &mut parser_pool,
-        );
+        let cache = build_diff_cache(patch, "Component.vue", "Dracula", &mut parser_pool);
 
         // Line 2 is "+const doubled = computed(() => count.value * 2);" (Added line)
         let added_line = &cache.lines[2];
@@ -1506,14 +1490,16 @@ mod tests {
         let mut parser_pool = ParserPool::new();
 
         let plain = build_plain_diff_cache(patch);
-        let highlighted =
-            build_diff_cache(patch, "foo.rs", "base16-ocean.dark", &mut parser_pool);
+        let highlighted = build_diff_cache(patch, "foo.rs", "base16-ocean.dark", &mut parser_pool);
 
         assert_eq!(plain.lines.len(), highlighted.lines.len());
 
         // highlighted フラグの検証
         assert!(!plain.highlighted, "plain cache should not be highlighted");
-        assert!(highlighted.highlighted, "highlighted cache should be highlighted");
+        assert!(
+            highlighted.highlighted,
+            "highlighted cache should be highlighted"
+        );
     }
 
     #[test]
@@ -1526,8 +1512,7 @@ mod tests {
         let mut parser_pool = ParserPool::new();
 
         let plain = build_plain_diff_cache(patch);
-        let highlighted =
-            build_diff_cache(patch, "foo.rs", "base16-ocean.dark", &mut parser_pool);
+        let highlighted = build_diff_cache(patch, "foo.rs", "base16-ocean.dark", &mut parser_pool);
 
         assert_eq!(plain.lines.len(), highlighted.lines.len());
 
@@ -1540,7 +1525,8 @@ mod tests {
 
         // render_cached_lines でコメントマーカーが挿入されること
         let plain_rendered = render_cached_lines(&plain, 0..plain.lines.len(), 0, &comment_lines);
-        let hl_rendered = render_cached_lines(&highlighted, 0..highlighted.lines.len(), 0, &comment_lines);
+        let hl_rendered =
+            render_cached_lines(&highlighted, 0..highlighted.lines.len(), 0, &comment_lines);
 
         for &line_idx in &[4usize, 6] {
             let plain_line_text: String = plain_rendered[line_idx]
