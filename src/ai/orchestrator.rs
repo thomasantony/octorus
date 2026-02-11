@@ -13,6 +13,7 @@ use super::adapter::{
     AgentAdapter, Context, ExternalComment, ReviewAction, RevieweeOutput, RevieweeStatus,
     ReviewerOutput,
 };
+use super::pending_review::PendingReview;
 use super::adapters::create_adapter;
 use super::prompt_loader::PromptLoader;
 use super::prompts::{
@@ -81,6 +82,10 @@ pub enum RallyEvent {
     AgentToolUse(String, String),    // tool_name, input_summary
     AgentToolResult(String, String), // tool_name, result_summary
     AgentText(String),               // text output
+    DryRunSaved {
+        path: String,
+        pending_review: Box<PendingReview>,
+    },
 }
 
 /// Result of the rally process
@@ -93,6 +98,7 @@ pub enum RallyResult {
     MaxIterationsReached { iteration: u32 },
     Aborted { iteration: u32, reason: String },
     Error { iteration: u32, error: String },
+    DryRun { path: String, pending_review: PendingReview },
 }
 
 /// Command sent from TUI to Orchestrator
@@ -123,6 +129,8 @@ pub struct Orchestrator {
     prompt_loader: PromptLoader,
     /// Command receiver for TUI commands
     command_receiver: Option<mpsc::Receiver<OrchestratorCommand>>,
+    /// Dry-run mode: run reviewer only, save output to disk, skip posting
+    dry_run: bool,
 }
 
 impl Orchestrator {
@@ -132,6 +140,7 @@ impl Orchestrator {
         config: AiConfig,
         event_sender: mpsc::Sender<RallyEvent>,
         command_receiver: Option<mpsc::Receiver<OrchestratorCommand>>,
+        dry_run: bool,
     ) -> Result<Self> {
         let mut reviewer_adapter = create_adapter(&config.reviewer, &config)?;
         let mut reviewee_adapter = create_adapter(&config.reviewee, &config)?;
@@ -156,6 +165,7 @@ impl Orchestrator {
             event_sender,
             prompt_loader,
             command_receiver,
+            dry_run,
         })
     }
 
@@ -237,6 +247,50 @@ impl Orchestrator {
             self.send_event(RallyEvent::ReviewCompleted(review_result.clone()))
                 .await;
             self.last_review = Some(review_result.clone());
+
+            // Dry-run mode: save review to disk and return early
+            if self.dry_run {
+                let context = self
+                    .context
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("Context not set"))?;
+                let pending = PendingReview {
+                    version: 1,
+                    repo: self.repo.clone(),
+                    pr_number: self.pr_number,
+                    head_sha: context.head_sha.clone(),
+                    base_branch: context.base_branch.clone(),
+                    created_at: chrono::Utc::now().to_rfc3339(),
+                    review: review_result,
+                };
+                match super::pending_review::write_pending_review(&pending) {
+                    Ok(path) => {
+                        let path_str = path.display().to_string();
+                        self.send_event(RallyEvent::DryRunSaved {
+                            path: path_str.clone(),
+                            pending_review: Box::new(pending.clone()),
+                        })
+                        .await;
+                        self.session.update_state(RallyState::Completed);
+                        let _ = write_session(&self.session);
+                        self.send_event(RallyEvent::StateChanged(RallyState::Completed))
+                            .await;
+                        return Ok(RallyResult::DryRun {
+                            path: path_str,
+                            pending_review: pending,
+                        });
+                    }
+                    Err(e) => {
+                        self.session.update_state(RallyState::Error);
+                        let _ = write_session(&self.session);
+                        let error = format!("Failed to save pending review: {}", e);
+                        self.send_event(RallyEvent::Error(error.clone())).await;
+                        self.send_event(RallyEvent::StateChanged(RallyState::Error))
+                            .await;
+                        return Err(anyhow!(error));
+                    }
+                }
+            }
 
             // Update head_sha before posting review (ensure we have the latest commit)
             if let Err(e) = self.update_head_sha().await {
@@ -764,62 +818,14 @@ impl Orchestrator {
             .as_ref()
             .ok_or_else(|| anyhow!("Context not set"))?;
 
-        // Map AI ReviewAction to App ReviewAction
-        let app_action = match review.action {
-            ReviewAction::Approve => crate::app::ReviewAction::Approve,
-            ReviewAction::RequestChanges => crate::app::ReviewAction::RequestChanges,
-            ReviewAction::Comment => crate::app::ReviewAction::Comment,
-        };
-
-        // Copy for potential fallback use (app_action is moved into submit_review)
-        let app_action_for_fallback = app_action;
-
-        // Add prefix to summary
-        let summary_with_prefix = format!("[AI Rally - Reviewer]\n\n{}", review.summary);
-
-        // Post summary comment using gh pr review
-        // If approve fails (e.g., can't approve own PR), fall back to comment
-        let result =
-            github::submit_review(&self.repo, self.pr_number, app_action, &summary_with_prefix)
-                .await;
-
-        if result.is_err() && matches!(app_action_for_fallback, crate::app::ReviewAction::Approve) {
-            warn!("Approve failed, falling back to comment");
-            github::submit_review(
-                &self.repo,
-                self.pr_number,
-                crate::app::ReviewAction::Comment,
-                &summary_with_prefix,
-            )
-            .await?;
-        } else {
-            result?;
-        }
-
-        // Post inline comments with rate limit handling
-        for comment in &review.comments {
-            // Add prefix to inline comment
-            let body_with_prefix = format!("[AI Rally - Reviewer]\n\n{}", comment.body);
-            if let Err(e) = github::create_review_comment(
-                &self.repo,
-                self.pr_number,
-                &context.head_sha,
-                &comment.path,
-                comment.line,
-                &body_with_prefix,
-            )
-            .await
-            {
-                warn!(
-                    "Failed to post inline comment on {}:{}: {}",
-                    comment.path, comment.line, e
-                );
-            }
-            // Rate limit mitigation: small delay between API calls
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-
-        Ok(())
+        super::poster::post_review_to_github(
+            &self.repo,
+            self.pr_number,
+            &context.head_sha,
+            review,
+            Some(&self.event_sender),
+        )
+        .await
     }
 
     /// Post fix summary comment to PR
