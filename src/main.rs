@@ -14,6 +14,7 @@ use octorus::{app, cache, config, github, loader, syntax};
 
 // init is only used by the binary, not needed for benchmarks
 mod init;
+mod post;
 
 #[derive(Parser, Debug)]
 #[command(name = "or")]
@@ -38,6 +39,10 @@ struct Args {
     /// Working directory for AI agents (default: current directory)
     #[arg(long)]
     working_dir: Option<String>,
+
+    /// Dry-run mode: run reviewer only, save output to disk, skip GitHub posting
+    #[arg(long, default_value = "false")]
+    dry_run: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -50,6 +55,11 @@ enum Commands {
     },
     /// Remove AI Rally session data
     Clean,
+    /// Post a saved dry-run review to GitHub
+    Post {
+        /// Path to the pending review JSON file
+        file: String,
+    },
 }
 
 /// Restore terminal to normal state
@@ -84,6 +94,7 @@ async fn main() -> Result<()> {
                 println!("Rally sessions cleaned: {}", rally_dir.display());
                 Ok(())
             }
+            Commands::Post { file } => post::run_post(&file).await,
         };
     }
 
@@ -131,6 +142,13 @@ async fn run_with_pr(repo: &str, pr: u32, config: &config::Config, args: &Args) 
     // Set flag to start AI Rally mode when --ai-rally is passed
     if args.ai_rally {
         app.set_start_ai_rally_on_load(true);
+    }
+
+    if args.dry_run {
+        if !args.ai_rally {
+            eprintln!("Warning: --dry-run has no effect without --ai-rally");
+        }
+        app.set_dry_run(true);
     }
 
     // Cancellation token for graceful shutdown
@@ -183,6 +201,13 @@ async fn run_with_pr_list(repo: &str, config: config::Config, args: &Args) -> Re
     // Set pending AI Rally flag if --ai-rally was passed
     if args.ai_rally {
         app.set_pending_ai_rally(true);
+    }
+
+    if args.dry_run {
+        if !args.ai_rally {
+            eprintln!("Warning: --dry-run has no effect without --ai-rally");
+        }
+        app.set_dry_run(true);
     }
 
     // Start loading PR list
