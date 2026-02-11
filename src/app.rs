@@ -2138,10 +2138,9 @@ impl App {
                     if total_comments > 0 {
                         edit_state.selected_comment =
                             (edit_state.selected_comment + 1).min(total_comments.saturating_sub(1));
-                        // Adjust scroll
-                        // We don't know visible_height here, so just ensure selection is reachable
-                        if edit_state.selected_comment >= edit_state.scroll_offset + 20 {
-                            edit_state.scroll_offset = edit_state.selected_comment.saturating_sub(19);
+                        // Adjust scroll (each item is 2 lines tall, estimate ~10 visible items)
+                        if edit_state.selected_comment >= edit_state.scroll_offset + 10 {
+                            edit_state.scroll_offset = edit_state.selected_comment.saturating_sub(9);
                         }
                     }
                 }
