@@ -233,6 +233,11 @@ fn render_history(frame: &mut Frame, area: Rect, state: &AiRallyState) {
                 crate::ai::orchestrator::RallyEvent::Error(e) => {
                     ("ERROR".to_string(), truncate_string(e, 60), Color::Red)
                 }
+                crate::ai::orchestrator::RallyEvent::DryRunSaved { ref path, .. } => (
+                    "DRY-RUN SAVED".to_string(),
+                    truncate_string(path, 60),
+                    Color::Green,
+                ),
                 _ => return None,
             };
 
