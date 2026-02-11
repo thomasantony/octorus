@@ -6,6 +6,8 @@ use ratatui::{
     Frame,
 };
 
+use std::collections::HashMap;
+
 use crate::ai::adapter::CommentSeverity;
 use crate::ai::pending_review::PendingReview;
 use crate::app::{App, PendingReviewEditState};
@@ -89,7 +91,13 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             );
         frame.render_widget(result_msg, chunks[1]);
     } else {
-        let files = app.files();
+        // Build file entries from saved patches (self-contained), with live data as fallback
+        let saved_files = files_from_patches(&pending.patches);
+        let files = if !saved_files.is_empty() {
+            &saved_files
+        } else {
+            app.files()
+        };
         // Each item is LINES_PER_ITEM lines tall (info + code snippet)
         const LINES_PER_ITEM: usize = 2;
         let visible_item_count = visible_height / LINES_PER_ITEM;
@@ -252,7 +260,12 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 
     // Render detail modal on top if showing
     if edit_state.showing_detail {
-        let files = app.files();
+        let saved_files = files_from_patches(&pending.patches);
+        let files = if !saved_files.is_empty() {
+            &saved_files
+        } else {
+            app.files()
+        };
         render_comment_detail_modal(frame, pending, edit_state, files);
     }
 }
@@ -480,6 +493,20 @@ fn parse_hunk_start(line: &str) -> Option<u32> {
     let after_plus = &line[plus_pos + 1..];
     let end_pos = after_plus.find([',', ' ']).unwrap_or(after_plus.len());
     after_plus[..end_pos].parse().ok()
+}
+
+/// Build ChangedFile entries from saved per-file patches.
+fn files_from_patches(patches: &HashMap<String, String>) -> Vec<ChangedFile> {
+    patches
+        .iter()
+        .map(|(filename, patch)| ChangedFile {
+            filename: filename.clone(),
+            status: String::new(),
+            additions: 0,
+            deletions: 0,
+            patch: Some(patch.clone()),
+        })
+        .collect()
 }
 
 /// Extract just the target line content from the diff patch.

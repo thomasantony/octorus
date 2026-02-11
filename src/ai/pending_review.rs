@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -18,6 +19,10 @@ pub struct PendingReview {
     pub base_branch: String,
     pub created_at: String,
     pub review: ReviewerOutput,
+    /// Per-file patches for code context display (filename -> patch).
+    /// Populated at save time so the review file is self-contained.
+    #[serde(default)]
+    pub patches: HashMap<String, String>,
 }
 
 pub fn write_pending_review(review: &PendingReview) -> Result<PathBuf> {
