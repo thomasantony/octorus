@@ -371,6 +371,8 @@ pub struct App {
     pending_ai_rally: bool,
     // Dry-run mode for AI Rally
     pub dry_run: bool,
+    // Standalone pending review mode (from `or review <file>`)
+    standalone_pending_review: bool,
     // Receiver for pending review post result
     pending_review_post_receiver: Option<mpsc::Receiver<Result<(), String>>>,
     // Comment submission state
@@ -463,6 +465,7 @@ impl App {
             start_ai_rally_on_load: false,
             pending_ai_rally: false,
             dry_run: false,
+            standalone_pending_review: false,
             pending_review_post_receiver: None,
             comment_submit_receiver: None,
             comment_submitting: false,
@@ -540,6 +543,7 @@ impl App {
             start_ai_rally_on_load: false,
             pending_ai_rally: false,
             dry_run: false,
+            standalone_pending_review: false,
             pending_review_post_receiver: None,
             comment_submit_receiver: None,
             comment_submitting: false,
@@ -628,6 +632,10 @@ impl App {
 
     pub fn set_dry_run(&mut self, v: bool) {
         self.dry_run = v;
+    }
+
+    pub fn set_standalone_pending_review(&mut self, v: bool) {
+        self.standalone_pending_review = v;
     }
 
     /// PR番号を取得（未設定の場合はpanic）
@@ -2117,11 +2125,13 @@ impl App {
 
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => {
-                // If we have a post result, just close
-                // Otherwise, cancel and go back to file list
                 self.pending_review = None;
                 self.pending_review_edit = None;
-                self.state = AppState::FileList;
+                if self.standalone_pending_review {
+                    self.should_quit = true;
+                } else {
+                    self.state = AppState::FileList;
+                }
             }
             KeyCode::Char('j') | KeyCode::Down => {
                 if let Some(ref mut edit_state) = self.pending_review_edit {
@@ -4000,6 +4010,7 @@ impl App {
             start_ai_rally_on_load: false,
             pending_ai_rally: false,
             dry_run: false,
+            standalone_pending_review: false,
             pending_review_post_receiver: None,
             comment_submit_receiver: None,
             comment_submitting: false,
