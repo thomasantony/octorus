@@ -26,9 +26,10 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         ])
         .split(frame.area());
 
-    render_header(frame, chunks[0], rally_state);
+    let dry_run = app.dry_run;
+    render_header(frame, chunks[0], rally_state, dry_run);
     render_main_content(frame, chunks[1], rally_state);
-    render_status_bar(frame, chunks[2], rally_state);
+    render_status_bar(frame, chunks[2], rally_state, dry_run);
 
     // Render modal on top if showing log detail
     if rally_state.showing_log_detail {
@@ -36,7 +37,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     }
 }
 
-fn render_header(frame: &mut Frame, area: Rect, state: &AiRallyState) {
+fn render_header(frame: &mut Frame, area: Rect, state: &AiRallyState, dry_run: bool) {
     let state_text = match state.state {
         RallyState::Initializing => "Initializing...",
         RallyState::ReviewerReviewing => "Reviewer reviewing...",
@@ -58,10 +59,17 @@ fn render_header(frame: &mut Frame, area: Rect, state: &AiRallyState) {
         RallyState::Error => Color::Red,
     };
 
-    let title = format!(
-        " AI Rally - Iteration {}/{} ",
-        state.iteration, state.max_iterations
-    );
+    let title = if dry_run {
+        format!(
+            " AI Rally [DRY-RUN] - Iteration {}/{} ",
+            state.iteration, state.max_iterations
+        )
+    } else {
+        format!(
+            " AI Rally - Iteration {}/{} ",
+            state.iteration, state.max_iterations
+        )
+    };
 
     let header = Paragraph::new(Line::from(vec![
         Span::styled("Status: ", Style::default().fg(Color::Gray)),
@@ -434,28 +442,29 @@ fn render_log_detail_modal(frame: &mut Frame, state: &AiRallyState) {
     frame.render_widget(content, modal_area);
 }
 
-fn render_status_bar(frame: &mut Frame, area: Rect, state: &AiRallyState) {
+fn render_status_bar(frame: &mut Frame, area: Rect, state: &AiRallyState, dry_run: bool) {
+    let dry_run_label = if dry_run { "D: Live mode" } else { "D: Dry-run" };
     let help_text = if state.showing_log_detail {
-        "Esc/Enter/q: Close detail"
+        "Esc/Enter/q: Close detail".to_string()
     } else {
         match state.state {
             RallyState::WaitingForClarification => {
-                "y: Open editor | n: Skip | j/k/↑↓: select | Enter: detail | q: Abort"
+                "y: Open editor | n: Skip | j/k/↑↓: select | Enter: detail | q: Abort".to_string()
             }
             RallyState::WaitingForPermission => {
-                "y: Approve | n: Deny | j/k/↑↓: select | Enter: detail | q: Abort"
+                "y: Approve | n: Deny | j/k/↑↓: select | Enter: detail | q: Abort".to_string()
             }
-            RallyState::Completed => "j/k/↑↓: select | Enter: detail | b: Background | q: Close",
-            RallyState::Aborted => "j/k/↑↓: select | Enter: detail | b: Background | q: Close",
+            RallyState::Completed => "j/k/↑↓: select | Enter: detail | b: Background | q: Close".to_string(),
+            RallyState::Aborted => "j/k/↑↓: select | Enter: detail | b: Background | q: Close".to_string(),
             RallyState::Error => {
-                "r: Retry | j/k/↑↓: select | Enter: detail | b: Background | q: Close"
+                format!("r: Retry | {} | j/k/↑↓: select | Enter: detail | b: Background | q: Close", dry_run_label)
             }
-            _ => "j/k/↑↓: select | Enter: detail | b: Background | q: Abort",
+            _ => format!("{} | j/k/↑↓: select | Enter: detail | b: Background | q: Abort", dry_run_label),
         }
     };
 
     let status_bar = Paragraph::new(Line::from(vec![Span::styled(
-        help_text,
+        help_text.clone(),
         Style::default().fg(Color::Cyan),
     )]))
     .block(
