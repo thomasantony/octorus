@@ -253,6 +253,8 @@ pub struct PendingReviewEditState {
     pub scroll_offset: usize,
     pub posting: bool,
     pub post_result: Option<Result<(), String>>,
+    /// Whether the comment detail modal is visible
+    pub showing_detail: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1116,6 +1118,7 @@ impl App {
                             scroll_offset: 0,
                             posting: false,
                             post_result: None,
+                            showing_detail: false,
                         });
                         // Only transition if there are comments to review
                         if num_comments > 0 {
@@ -2093,6 +2096,19 @@ impl App {
         key: KeyEvent,
         terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     ) -> Result<()> {
+        // Handle detail modal first
+        if let Some(ref mut edit_state) = self.pending_review_edit {
+            if edit_state.showing_detail {
+                match key.code {
+                    KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
+                        edit_state.showing_detail = false;
+                    }
+                    _ => {}
+                }
+                return Ok(());
+            }
+        }
+
         let total_comments = self
             .pending_review
             .as_ref()
@@ -2180,6 +2196,13 @@ impl App {
                                 }
                             }
                         }
+                    }
+                }
+            }
+            KeyCode::Enter => {
+                if let Some(ref mut edit_state) = self.pending_review_edit {
+                    if !edit_state.posting && edit_state.post_result.is_none() && total_comments > 0 {
+                        edit_state.showing_detail = true;
                     }
                 }
             }

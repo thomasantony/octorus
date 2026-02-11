@@ -1,13 +1,14 @@
 use ratatui::{
-    layout::{Constraint, Direction, Layout},
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
+    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
     Frame,
 };
 
 use crate::ai::adapter::CommentSeverity;
-use crate::app::App;
+use crate::ai::pending_review::PendingReview;
+use crate::app::{App, PendingReviewEditState};
 
 pub fn render(frame: &mut Frame, app: &mut App) {
     let (Some(pending), Some(edit_state)) = (&app.pending_review, &app.pending_review_edit) else {
@@ -200,12 +201,14 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     }
 
     // Status bar
-    let help_text = if edit_state.posting {
+    let help_text = if edit_state.showing_detail {
+        "Esc/Enter/q: Close detail"
+    } else if edit_state.posting {
         "Posting..."
     } else if edit_state.post_result.is_some() {
         "q: Close"
     } else {
-        "j/k: Navigate | d: Toggle delete | e: Edit | p: Post | q: Cancel"
+        "j/k: Navigate | Enter: View | d: Toggle delete | e: Edit | p: Post | q: Cancel"
     };
 
     let status_bar = Paragraph::new(Line::from(vec![Span::styled(
@@ -218,6 +221,109 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             .border_style(Style::default().fg(Color::DarkGray)),
     );
     frame.render_widget(status_bar, chunks[2]);
+
+    // Render detail modal on top if showing
+    if edit_state.showing_detail {
+        render_comment_detail_modal(frame, pending, edit_state);
+    }
+}
+
+fn render_comment_detail_modal(
+    frame: &mut Frame,
+    pending: &PendingReview,
+    edit_state: &PendingReviewEditState,
+) {
+    let Some(comment) = pending.review.comments.get(edit_state.selected_comment) else {
+        return;
+    };
+
+    let body = if let Some(edited) = edit_state.edited_bodies.get(&edit_state.selected_comment) {
+        edited.as_str()
+    } else {
+        &comment.body
+    };
+
+    let is_deleted = edit_state
+        .deleted_comments
+        .contains(&edit_state.selected_comment);
+
+    let severity_str = match comment.severity {
+        CommentSeverity::Critical => "Critical",
+        CommentSeverity::Major => "Major",
+        CommentSeverity::Minor => "Minor",
+        CommentSeverity::Suggestion => "Suggestion",
+    };
+    let severity_color = match comment.severity {
+        CommentSeverity::Critical => Color::Red,
+        CommentSeverity::Major => Color::Yellow,
+        CommentSeverity::Minor => Color::Blue,
+        CommentSeverity::Suggestion => Color::Green,
+    };
+
+    let area = frame.area();
+    let modal_width = (area.width as f32 * 0.8) as u16;
+    let modal_height = (area.height as f32 * 0.7) as u16;
+    let modal_x = (area.width.saturating_sub(modal_width)) / 2;
+    let modal_y = (area.height.saturating_sub(modal_height)) / 2;
+    let modal_area = Rect::new(modal_x, modal_y, modal_width, modal_height);
+
+    frame.render_widget(Clear, modal_area);
+
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled("File: ", Style::default().fg(Color::Gray)),
+            Span::styled(&comment.path, Style::default().fg(Color::Cyan)),
+            Span::styled(
+                format!("  Line: {}", comment.line),
+                Style::default().fg(Color::Gray),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Severity: ", Style::default().fg(Color::Gray)),
+            Span::styled(
+                severity_str,
+                Style::default()
+                    .fg(severity_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            if is_deleted {
+                Span::styled("  [DELETED]", Style::default().fg(Color::Red))
+            } else if edit_state
+                .edited_bodies
+                .contains_key(&edit_state.selected_comment)
+            {
+                Span::styled("  [EDITED]", Style::default().fg(Color::Yellow))
+            } else {
+                Span::raw("")
+            },
+        ]),
+        Line::from(""),
+    ];
+
+    for text_line in body.lines() {
+        lines.push(Line::from(Span::styled(
+            text_line.to_string(),
+            Style::default().fg(Color::White),
+        )));
+    }
+
+    let title = format!(
+        " Comment {}/{} ",
+        edit_state.selected_comment + 1,
+        pending.review.comments.len()
+    );
+
+    let content = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(title)
+                .title_bottom(Line::from(" Press Esc/Enter/q to close ").centered())
+                .border_style(Style::default().fg(severity_color)),
+        );
+
+    frame.render_widget(content, modal_area);
 }
 
 fn truncate(s: &str, max_chars: usize) -> String {
