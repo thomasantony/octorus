@@ -237,14 +237,14 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     }
 
     // Status bar
-    let help_text = if edit_state.showing_detail {
-        "Esc/Enter/q: Close detail"
+    let help_text = if edit_state.showing_detail || edit_state.showing_summary {
+        "Esc/Enter/q: Close"
     } else if edit_state.posting {
         "Posting..."
     } else if edit_state.post_result.is_some() {
         "q: Close"
     } else {
-        "j/k: Navigate | Enter: View | d: Toggle delete | e: Edit | p: Post | q: Cancel"
+        "j/k: Navigate | Enter: View | s: Summary | d: Delete | e: Edit | p: Post | q: Cancel"
     };
 
     let status_bar = Paragraph::new(Line::from(vec![Span::styled(
@@ -267,6 +267,11 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             app.files()
         };
         render_comment_detail_modal(frame, pending, edit_state, files);
+    }
+
+    // Render summary modal on top if showing
+    if edit_state.showing_summary {
+        render_summary_modal(frame, pending);
     }
 }
 
@@ -417,6 +422,49 @@ fn render_comment_detail_modal(
 
 /// Extract code lines around a target new-file line number from the patch.
 /// Returns Vec of (new_line_number, content, line_type) for display.
+fn render_summary_modal(frame: &mut Frame, pending: &PendingReview) {
+    let area = frame.area();
+    let modal_width = (area.width as f32 * 0.8) as u16;
+    let modal_height = (area.height as f32 * 0.6) as u16;
+    let modal_x = (area.width.saturating_sub(modal_width)) / 2;
+    let modal_y = (area.height.saturating_sub(modal_height)) / 2;
+    let modal_area = Rect::new(modal_x, modal_y, modal_width, modal_height);
+
+    frame.render_widget(Clear, modal_area);
+
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled("Action: ", Style::default().fg(Color::Gray)),
+            Span::styled(
+                format!("{:?}", pending.review.action),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(""),
+    ];
+
+    for text_line in pending.review.summary.lines() {
+        lines.push(Line::from(Span::styled(
+            text_line.to_string(),
+            Style::default().fg(Color::White),
+        )));
+    }
+
+    let content = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Review Summary ")
+                .title_bottom(Line::from(" Press Esc/Enter/q to close ").centered())
+                .border_style(Style::default().fg(Color::Yellow)),
+        );
+
+    frame.render_widget(content, modal_area);
+}
+
 fn extract_code_context(
     files: &[ChangedFile],
     path: &str,
