@@ -254,6 +254,19 @@ impl Orchestrator {
                     .context
                     .as_ref()
                     .ok_or_else(|| anyhow!("Context not set"))?;
+
+                // Extract per-file patches for files referenced by comments
+                let all_patches = crate::diff::parse_unified_diff(&context.diff);
+                let commented_files: std::collections::HashSet<&str> = review_result
+                    .comments
+                    .iter()
+                    .map(|c| c.path.as_str())
+                    .collect();
+                let patches = all_patches
+                    .into_iter()
+                    .filter(|(filename, _)| commented_files.contains(filename.as_str()))
+                    .collect();
+
                 let pending = PendingReview {
                     version: 1,
                     repo: self.repo.clone(),
@@ -262,6 +275,7 @@ impl Orchestrator {
                     base_branch: context.base_branch.clone(),
                     created_at: chrono::Utc::now().to_rfc3339(),
                     review: review_result,
+                    patches,
                 };
                 match super::pending_review::write_pending_review(&pending) {
                     Ok(path) => {
