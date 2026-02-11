@@ -255,6 +255,8 @@ pub struct PendingReviewEditState {
     pub post_result: Option<Result<(), String>>,
     /// Whether the comment detail modal is visible
     pub showing_detail: bool,
+    /// Whether the summary modal is visible
+    pub showing_summary: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1127,6 +1129,7 @@ impl App {
                             posting: false,
                             post_result: None,
                             showing_detail: false,
+                            showing_summary: false,
                         });
                         // Only transition if there are comments to review
                         if num_comments > 0 {
@@ -2104,12 +2107,21 @@ impl App {
         key: KeyEvent,
         terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     ) -> Result<()> {
-        // Handle detail modal first
+        // Handle modals first
         if let Some(ref mut edit_state) = self.pending_review_edit {
             if edit_state.showing_detail {
                 match key.code {
                     KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
                         edit_state.showing_detail = false;
+                    }
+                    _ => {}
+                }
+                return Ok(());
+            }
+            if edit_state.showing_summary {
+                match key.code {
+                    KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
+                        edit_state.showing_summary = false;
                     }
                     _ => {}
                 }
@@ -2212,6 +2224,13 @@ impl App {
                 if let Some(ref mut edit_state) = self.pending_review_edit {
                     if !edit_state.posting && edit_state.post_result.is_none() && total_comments > 0 {
                         edit_state.showing_detail = true;
+                    }
+                }
+            }
+            KeyCode::Char('s') => {
+                if let Some(ref mut edit_state) = self.pending_review_edit {
+                    if !edit_state.posting && edit_state.post_result.is_none() {
+                        edit_state.showing_summary = true;
                     }
                 }
             }
