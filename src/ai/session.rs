@@ -30,7 +30,7 @@ pub enum HistoryEntryType {
     Fix(RevieweeOutput),
 }
 
-fn rally_dir(repo: &str, pr_number: u32) -> Result<PathBuf> {
+pub(crate) fn rally_dir(repo: &str, pr_number: u32) -> Result<PathBuf> {
     let safe_repo = sanitize_repo_name(repo)?;
     let dir = BaseDirectories::with_prefix("octorus")
         .map(|dirs| {

@@ -1,6 +1,8 @@
 pub mod adapter;
 pub mod adapters;
 pub mod orchestrator;
+pub mod pending_review;
+pub mod poster;
 pub mod prompt_loader;
 pub mod prompts;
 pub mod session;
