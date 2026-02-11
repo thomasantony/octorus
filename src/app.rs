@@ -368,7 +368,7 @@ pub struct App {
     // Pending AI Rally flag (set when --ai-rally is passed with PR list mode)
     pending_ai_rally: bool,
     // Dry-run mode for AI Rally
-    dry_run: bool,
+    pub dry_run: bool,
     // Receiver for pending review post result
     pending_review_post_receiver: Option<mpsc::Receiver<Result<(), String>>>,
     // Comment submission state
@@ -2005,6 +2005,20 @@ impl App {
                         // Restart the rally
                         self.start_ai_rally();
                     }
+                }
+            }
+            KeyCode::Char('D') => {
+                // Toggle dry-run mode
+                self.dry_run = !self.dry_run;
+                if let Some(ref mut rally_state) = self.ai_rally_state {
+                    rally_state.push_log(LogEntry::new(
+                        LogEventType::Info,
+                        if self.dry_run {
+                            "Dry-run mode enabled".to_string()
+                        } else {
+                            "Dry-run mode disabled (live mode)".to_string()
+                        },
+                    ));
                 }
             }
             // Log selection and scrolling
