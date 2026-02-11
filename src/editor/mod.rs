@@ -125,6 +125,27 @@ pub fn open_file_at_line(editor: &str, file_path: &str, line: usize) -> Result<(
     Ok(())
 }
 
+/// Open external editor for editing a pending review comment body
+pub fn open_pending_comment_editor(
+    editor: &str,
+    path: &str,
+    line: u32,
+    current_body: &str,
+) -> Result<Option<String>> {
+    open_editor_internal(
+        editor,
+        EditorTemplate {
+            header: Cow::Owned(format!(
+                "<!-- octorus: Edit review comment -->\n\
+                 <!-- File: {} Line: {} -->\n\
+                 <!-- Save and close to apply. Delete all content to cancel. -->",
+                path, line
+            )),
+            initial_content: Some(Cow::Borrowed(current_body)),
+        },
+    )
+}
+
 /// Open external editor for AI Rally clarification response
 /// Returns the user's answer to the clarification question
 pub fn open_clarification_editor(editor: &str, question: &str) -> Result<Option<String>> {

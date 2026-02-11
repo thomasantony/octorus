@@ -5,6 +5,7 @@ pub mod diff_view;
 mod file_list;
 mod footer;
 mod help;
+mod pending_review;
 mod pr_list;
 mod split_view;
 pub mod text_area;
@@ -44,7 +45,7 @@ pub fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Re
 
 pub fn render(frame: &mut Frame, app: &mut App) {
     // PR一覧画面は独自のローディング処理があるためスキップ
-    if app.state != AppState::PullRequestList {
+    if !matches!(app.state, AppState::PullRequestList | AppState::PendingReviewEdit) {
         // Loading状態の場合は専用画面を表示
         if matches!(app.data_state, DataState::Loading) {
             file_list::render_loading(frame, app);
@@ -64,6 +65,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         AppState::CommentList => comment_list::render(frame, app),
         AppState::Help => help::render(frame, app),
         AppState::AiRally => ai_rally::render(frame, app),
+        AppState::PendingReviewEdit => pending_review::render(frame, app),
         AppState::SplitViewFileList | AppState::SplitViewDiff => split_view::render(frame, app),
     }
 

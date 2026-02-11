@@ -147,6 +147,7 @@ pub enum AppState {
     AiRally,
     SplitViewFileList,
     SplitViewDiff,
+    PendingReviewEdit,
 }
 
 /// Variant for diff view handling (fullscreen vs split pane)
@@ -244,6 +245,16 @@ impl AiRallyState {
     }
 }
 
+/// State for the pending review edit screen (dry-run review before posting)
+pub struct PendingReviewEditState {
+    pub selected_comment: usize,
+    pub deleted_comments: HashSet<usize>,
+    pub edited_bodies: HashMap<usize, String>,
+    pub scroll_offset: usize,
+    pub posting: bool,
+    pub post_result: Option<Result<(), String>>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ReviewAction {
     Approve,
@@ -334,6 +345,9 @@ pub struct App {
     pub comment_tab: CommentTab,
     // AI Rally state
     pub ai_rally_state: Option<AiRallyState>,
+    // Pending review edit state (dry-run mode)
+    pub pending_review: Option<crate::ai::pending_review::PendingReview>,
+    pub pending_review_edit: Option<PendingReviewEditState>,
     pub working_dir: Option<String>,
     // Receivers
     // PR-specific receivers carry the originating PR number to avoid
@@ -353,6 +367,10 @@ pub struct App {
     start_ai_rally_on_load: bool,
     // Pending AI Rally flag (set when --ai-rally is passed with PR list mode)
     pending_ai_rally: bool,
+    // Dry-run mode for AI Rally
+    dry_run: bool,
+    // Receiver for pending review post result
+    pending_review_post_receiver: Option<mpsc::Receiver<Result<(), String>>>,
     // Comment submission state
     comment_submit_receiver: PrReceiver<CommentSubmitResult>,
     comment_submitting: bool,
@@ -428,6 +446,8 @@ impl App {
             discussion_comment_detail_scroll: 0,
             comment_tab: CommentTab::default(),
             ai_rally_state: None,
+            pending_review: None,
+            pending_review_edit: None,
             working_dir: None,
             data_receiver: Some((pr_number, rx)),
             retry_sender: None,
@@ -440,6 +460,8 @@ impl App {
             rally_command_sender: None,
             start_ai_rally_on_load: false,
             pending_ai_rally: false,
+            dry_run: false,
+            pending_review_post_receiver: None,
             comment_submit_receiver: None,
             comment_submitting: false,
             submission_result: None,
@@ -501,6 +523,8 @@ impl App {
             discussion_comment_detail_scroll: 0,
             comment_tab: CommentTab::default(),
             ai_rally_state: None,
+            pending_review: None,
+            pending_review_edit: None,
             working_dir: None,
             data_receiver: None,
             retry_sender: None,
@@ -513,6 +537,8 @@ impl App {
             rally_command_sender: None,
             start_ai_rally_on_load: false,
             pending_ai_rally: false,
+            dry_run: false,
+            pending_review_post_receiver: None,
             comment_submit_receiver: None,
             comment_submitting: false,
             submission_result: None,
@@ -565,6 +591,7 @@ impl App {
             self.poll_discussion_comment_updates();
             self.poll_comment_submit_updates();
             self.poll_rally_events();
+            self.poll_pending_review_post();
             terminal.draw(|frame| ui::render(frame, self))?;
             self.handle_input(&mut terminal).await?;
         }
@@ -595,6 +622,10 @@ impl App {
     /// Set pending AI Rally flag (for PR list mode with --ai-rally)
     pub fn set_pending_ai_rally(&mut self, pending: bool) {
         self.pending_ai_rally = pending;
+    }
+
+    pub fn set_dry_run(&mut self, v: bool) {
+        self.dry_run = v;
     }
 
     /// PR番号を取得（未設定の場合はpanic）
@@ -985,6 +1016,12 @@ impl App {
         loop {
             match rx.try_recv() {
                 Ok(event) => {
+                    // Extract pending review from dry-run event before the event is consumed
+                    let dry_run_pending = if let RallyEvent::DryRunSaved { pending_review, .. } = &event {
+                        Some(*pending_review.clone())
+                    } else {
+                        None
+                    };
                     if let Some(ref mut rally_state) = self.ai_rally_state {
                         match &event {
                             RallyEvent::StateChanged(state) => {
@@ -1058,9 +1095,32 @@ impl App {
                                     format!("Permission needed: {} - {}", action, reason),
                                 ));
                             }
+                            RallyEvent::DryRunSaved { ref path, .. } => {
+                                rally_state.push_log(LogEntry::new(
+                                    LogEventType::Info,
+                                    format!("Dry-run review saved to: {}", path),
+                                ));
+                            }
                             _ => {}
                         }
                         rally_state.history.push(event);
+                    }
+                    // Auto-transition to pending review edit screen after dry-run
+                    if let Some(pending) = dry_run_pending {
+                        let num_comments = pending.review.comments.len();
+                        self.pending_review = Some(pending);
+                        self.pending_review_edit = Some(PendingReviewEditState {
+                            selected_comment: 0,
+                            deleted_comments: HashSet::new(),
+                            edited_bodies: HashMap::new(),
+                            scroll_offset: 0,
+                            posting: false,
+                            post_result: None,
+                        });
+                        // Only transition if there are comments to review
+                        if num_comments > 0 {
+                            self.state = AppState::PendingReviewEdit;
+                        }
                     }
                 }
                 Err(mpsc::error::TryRecvError::Empty) => break,
@@ -1076,6 +1136,31 @@ impl App {
                         }
                     }
                     break;
+                }
+            }
+        }
+    }
+
+    fn poll_pending_review_post(&mut self) {
+        let Some(ref mut rx) = self.pending_review_post_receiver else {
+            return;
+        };
+
+        match rx.try_recv() {
+            Ok(result) => {
+                self.pending_review_post_receiver = None;
+                if let Some(ref mut edit_state) = self.pending_review_edit {
+                    edit_state.posting = false;
+                    edit_state.post_result = Some(result);
+                }
+            }
+            Err(mpsc::error::TryRecvError::Empty) => {}
+            Err(mpsc::error::TryRecvError::Disconnected) => {
+                self.pending_review_post_receiver = None;
+                if let Some(ref mut edit_state) = self.pending_review_edit {
+                    edit_state.posting = false;
+                    edit_state.post_result =
+                        Some(Err("Post task terminated unexpectedly".to_string()));
                 }
             }
         }
@@ -1203,6 +1288,7 @@ impl App {
                     AppState::CommentList => self.handle_comment_list_input(key, terminal).await?,
                     AppState::Help => self.handle_help_input(key)?,
                     AppState::AiRally => self.handle_ai_rally_input(key, terminal).await?,
+                    AppState::PendingReviewEdit => self.handle_pending_review_input(key, terminal).await?,
                     AppState::SplitViewFileList => {
                         self.handle_split_view_file_list_input(key, terminal)
                             .await?
@@ -1988,6 +2074,159 @@ impl App {
         Ok(())
     }
 
+    async fn handle_pending_review_input(
+        &mut self,
+        key: KeyEvent,
+        terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    ) -> Result<()> {
+        let total_comments = self
+            .pending_review
+            .as_ref()
+            .map(|p| p.review.comments.len())
+            .unwrap_or(0);
+
+        match key.code {
+            KeyCode::Char('q') | KeyCode::Esc => {
+                // If we have a post result, just close
+                // Otherwise, cancel and go back to file list
+                self.pending_review = None;
+                self.pending_review_edit = None;
+                self.state = AppState::FileList;
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                if let Some(ref mut edit_state) = self.pending_review_edit {
+                    if total_comments > 0 {
+                        edit_state.selected_comment =
+                            (edit_state.selected_comment + 1).min(total_comments.saturating_sub(1));
+                        // Adjust scroll
+                        // We don't know visible_height here, so just ensure selection is reachable
+                        if edit_state.selected_comment >= edit_state.scroll_offset + 20 {
+                            edit_state.scroll_offset = edit_state.selected_comment.saturating_sub(19);
+                        }
+                    }
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                if let Some(ref mut edit_state) = self.pending_review_edit {
+                    edit_state.selected_comment = edit_state.selected_comment.saturating_sub(1);
+                    if edit_state.selected_comment < edit_state.scroll_offset {
+                        edit_state.scroll_offset = edit_state.selected_comment;
+                    }
+                }
+            }
+            KeyCode::Char('d') => {
+                if let Some(ref mut edit_state) = self.pending_review_edit {
+                    if !edit_state.posting && edit_state.post_result.is_none() {
+                        let idx = edit_state.selected_comment;
+                        if edit_state.deleted_comments.contains(&idx) {
+                            edit_state.deleted_comments.remove(&idx);
+                        } else {
+                            edit_state.deleted_comments.insert(idx);
+                        }
+                    }
+                }
+            }
+            KeyCode::Char('e') => {
+                if let Some(ref edit_state) = self.pending_review_edit {
+                    if !edit_state.posting && edit_state.post_result.is_none() {
+                        let idx = edit_state.selected_comment;
+                        if !edit_state.deleted_comments.contains(&idx) {
+                            if let Some(ref pending) = self.pending_review {
+                                if let Some(comment) = pending.review.comments.get(idx) {
+                                    let current_body = if let Some(edited) =
+                                        edit_state.edited_bodies.get(&idx)
+                                    {
+                                        edited.clone()
+                                    } else {
+                                        comment.body.clone()
+                                    };
+                                    let path = comment.path.clone();
+                                    let line = comment.line;
+
+                                    // Open external editor
+                                    ui::restore_terminal(terminal)?;
+                                    let result =
+                                        crate::editor::open_pending_comment_editor(
+                                            &self.config.editor,
+                                            &path,
+                                            line,
+                                            &current_body,
+                                        )?;
+                                    *terminal = ui::setup_terminal()?;
+
+                                    if let Some(new_body) = result {
+                                        if let Some(ref mut edit_state) =
+                                            self.pending_review_edit
+                                        {
+                                            edit_state
+                                                .edited_bodies
+                                                .insert(idx, new_body);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            KeyCode::Char('p') => {
+                if let Some(ref edit_state) = self.pending_review_edit {
+                    if !edit_state.posting && edit_state.post_result.is_none() {
+                        // Build the final review with edits applied and deletions removed
+                        if let Some(ref pending) = self.pending_review {
+                            let mut final_review = pending.review.clone();
+
+                            // Apply edits and remove deleted comments
+                            let mut final_comments = Vec::new();
+                            for (i, mut comment) in
+                                final_review.comments.into_iter().enumerate()
+                            {
+                                if edit_state.deleted_comments.contains(&i) {
+                                    continue;
+                                }
+                                if let Some(edited_body) = edit_state.edited_bodies.get(&i) {
+                                    comment.body = edited_body.clone();
+                                }
+                                final_comments.push(comment);
+                            }
+                            final_review.comments = final_comments;
+
+                            let repo = pending.repo.clone();
+                            let pr_number = pending.pr_number;
+                            let head_sha = pending.head_sha.clone();
+
+                            // Mark as posting
+                            if let Some(ref mut edit_state) = self.pending_review_edit {
+                                edit_state.posting = true;
+                            }
+
+                            // Spawn the posting task
+                            let (tx, rx) = mpsc::channel(1);
+                            tokio::spawn(async move {
+                                let result =
+                                    crate::ai::poster::post_review_to_github(
+                                        &repo,
+                                        pr_number,
+                                        &head_sha,
+                                        &final_review,
+                                        None,
+                                    )
+                                    .await;
+                                let _ = tx
+                                    .send(result.map_err(|e| e.to_string()))
+                                    .await;
+                            });
+
+                            self.pending_review_post_receiver = Some(rx);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     /// Adjust log scroll offset to keep the selected log visible
     fn adjust_log_scroll_to_selection(&mut self) {
         if let Some(ref mut rally_state) = self.ai_rally_state {
@@ -2176,9 +2415,10 @@ impl App {
         let repo = self.repo.clone();
         let pr_number = self.pr_number();
 
+        let dry_run = self.dry_run;
         let handle = tokio::spawn(async move {
             let orchestrator_result =
-                Orchestrator::new(&repo, pr_number, config, event_tx.clone(), Some(cmd_rx));
+                Orchestrator::new(&repo, pr_number, config, event_tx.clone(), Some(cmd_rx), dry_run);
             match orchestrator_result {
                 Ok(mut orchestrator) => {
                     orchestrator.set_context(context);
@@ -3708,6 +3948,8 @@ impl App {
             discussion_comment_detail_scroll: 0,
             comment_tab: CommentTab::default(),
             ai_rally_state: None,
+            pending_review: None,
+            pending_review_edit: None,
             working_dir: None,
             data_receiver: None,
             retry_sender: None,
@@ -3720,6 +3962,8 @@ impl App {
             rally_command_sender: None,
             start_ai_rally_on_load: false,
             pending_ai_rally: false,
+            dry_run: false,
+            pending_review_post_receiver: None,
             comment_submit_receiver: None,
             comment_submitting: false,
             submission_result: None,
