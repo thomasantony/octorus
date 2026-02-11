@@ -89,6 +89,11 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             );
         frame.render_widget(result_msg, chunks[1]);
     } else {
+        let files = app.files();
+        // Each item is LINES_PER_ITEM lines tall (info + code snippet)
+        const LINES_PER_ITEM: usize = 2;
+        let visible_item_count = visible_height / LINES_PER_ITEM;
+
         let items: Vec<ListItem> = comments
             .iter()
             .enumerate()
@@ -134,7 +139,14 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                     Style::default()
                 };
 
-                let mut item = ListItem::new(Line::from(vec![
+                let dimmed = if is_deleted {
+                    Style::default().fg(Color::DarkGray)
+                } else {
+                    Style::default().fg(Color::White)
+                };
+
+                // Line 1: comment info + body preview
+                let info_line = Line::from(vec![
                     Span::styled(
                         selector.to_string(),
                         Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
@@ -149,15 +161,29 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                     ),
                     Span::styled(status_marker.to_string(), Style::default().fg(Color::Yellow)),
                     Span::raw(" "),
-                    Span::styled(
-                        truncate(body, 60),
-                        if is_deleted {
-                            Style::default().fg(Color::DarkGray)
-                        } else {
-                            Style::default().fg(Color::White)
-                        },
-                    ),
-                ]));
+                    Span::styled(truncate(body, 60), dimmed),
+                ]);
+
+                // Line 2: code snippet from the diff
+                let code_line = extract_target_line(files, &comment.path, comment.line)
+                    .map(|(content, line_type)| {
+                        let (prefix, prefix_color) = match line_type {
+                            LineType::Added => ("+", Color::Green),
+                            LineType::Removed => ("-", Color::Red),
+                            _ => (" ", Color::DarkGray),
+                        };
+                        let code_color = if is_deleted { Color::DarkGray } else { prefix_color };
+                        Line::from(vec![
+                            Span::styled("  ", Style::default()),
+                            Span::styled(
+                                format!("{} {}", prefix, content.trim_end()),
+                                Style::default().fg(code_color),
+                            ),
+                        ])
+                    })
+                    .unwrap_or_else(|| Line::from(""));
+
+                let mut item = ListItem::new(vec![info_line, code_line]);
 
                 if is_selected && !is_deleted {
                     item = item.style(base_style);
@@ -170,7 +196,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             .collect();
 
         let scroll_offset = edit_state.scroll_offset;
-        let visible_items: Vec<ListItem> = items.into_iter().skip(scroll_offset).take(visible_height).collect();
+        let visible_items: Vec<ListItem> = items.into_iter().skip(scroll_offset).take(visible_item_count).collect();
 
         let block = Block::default()
             .borders(Borders::ALL)
@@ -188,12 +214,12 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         frame.render_widget(list, inner_area);
 
         // Scrollbar
-        if total_comments > visible_height {
+        if total_comments > visible_item_count {
             let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
                 .begin_symbol(Some("▲"))
                 .end_symbol(Some("▼"));
             let mut scrollbar_state =
-                ScrollbarState::new(total_comments.saturating_sub(visible_height)).position(scroll_offset);
+                ScrollbarState::new(total_comments.saturating_sub(visible_item_count)).position(scroll_offset);
             frame.render_stateful_widget(
                 scrollbar,
                 chunks[1].inner(ratatui::layout::Margin { vertical: 1, horizontal: 0 }),
@@ -454,6 +480,19 @@ fn parse_hunk_start(line: &str) -> Option<u32> {
     let after_plus = &line[plus_pos + 1..];
     let end_pos = after_plus.find([',', ' ']).unwrap_or(after_plus.len());
     after_plus[..end_pos].parse().ok()
+}
+
+/// Extract just the target line content from the diff patch.
+/// Returns (content, line_type) or None if the target line is not found.
+fn extract_target_line(
+    files: &[ChangedFile],
+    path: &str,
+    target_line: u32,
+) -> Option<(String, LineType)> {
+    extract_code_context(files, path, target_line, 0)
+        .into_iter()
+        .next()
+        .map(|(_, content, lt)| (content, lt))
 }
 
 fn truncate(s: &str, max_chars: usize) -> String {
