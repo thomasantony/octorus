@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use super::adapter::ReviewerOutput;
 use super::session::rally_dir;
+use crate::cache::cache_dir;
 
 const CURRENT_VERSION: u32 = 1;
 
@@ -53,4 +54,48 @@ pub fn read_pending_review(path: &Path) -> Result<PendingReview> {
     }
 
     Ok(review)
+}
+
+/// A discovered pending review file with its metadata.
+pub struct PendingReviewEntry {
+    pub path: PathBuf,
+    pub repo: String,
+    pub pr_number: u32,
+    pub comment_count: usize,
+    pub created_at: String,
+}
+
+/// Scan the rally cache directory for all pending_review.json files.
+/// Returns entries sorted by creation time (newest first).
+pub fn find_pending_reviews() -> Vec<PendingReviewEntry> {
+    let rally_dir = cache_dir().join("rally");
+    let Ok(entries) = fs::read_dir(&rally_dir) else {
+        return Vec::new();
+    };
+
+    let mut results: Vec<PendingReviewEntry> = entries
+        .filter_map(|e| e.ok())
+        .filter_map(|entry| {
+            let path = entry.path().join("pending_review.json");
+            if !path.exists() {
+                return None;
+            }
+            let content = fs::read_to_string(&path).ok()?;
+            let review: PendingReview = serde_json::from_str(&content).ok()?;
+            if review.version != CURRENT_VERSION {
+                return None;
+            }
+            Some(PendingReviewEntry {
+                path,
+                repo: review.repo,
+                pr_number: review.pr_number,
+                comment_count: review.review.comments.len(),
+                created_at: review.created_at,
+            })
+        })
+        .collect();
+
+    // Sort newest first
+    results.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    results
 }
