@@ -60,6 +60,11 @@ enum Commands {
         /// Path to the pending review JSON file
         file: String,
     },
+    /// View and edit a saved dry-run review in the TUI
+    Review {
+        /// Path to the pending review JSON file (auto-detected if omitted)
+        file: Option<String>,
+    },
 }
 
 /// Restore terminal to normal state
@@ -95,6 +100,19 @@ async fn main() -> Result<()> {
                 Ok(())
             }
             Commands::Post { file } => post::run_post(&file).await,
+            Commands::Review { file } => {
+                let path = match file {
+                    Some(f) => {
+                        if !std::path::Path::new(&f).exists() {
+                            eprintln!("Error: file not found: {}", f);
+                            std::process::exit(1);
+                        }
+                        f
+                    }
+                    None => resolve_pending_review_path()?,
+                };
+                run_with_pending_review(&path).await
+            }
         };
     }
 
@@ -232,6 +250,118 @@ async fn run_with_pr_list(repo: &str, config: config::Config, args: &Args) -> Re
     // run_with_pr と同様、spawn_blocking タスクの完了待ちによるハングを防止するため
     // 即座にプロセスを終了する。バックグラウンドタスクやサブプロセスの明示的な停止は
     // app.run() 内で完了済み。
+    let exit_code = if result.is_ok() { 0 } else { 1 };
+    std::process::exit(exit_code);
+}
+
+/// Find a pending review file automatically.
+/// If there's exactly one, confirm with the user. If multiple, let them pick.
+fn resolve_pending_review_path() -> Result<String> {
+    use octorus::ai::pending_review::find_pending_reviews;
+
+    let reviews = find_pending_reviews();
+
+    if reviews.is_empty() {
+        eprintln!("No pending reviews found.");
+        eprintln!("Run AI Rally with --dry-run first, or specify a file path: or review <file>");
+        std::process::exit(1);
+    }
+
+    if reviews.len() == 1 {
+        let r = &reviews[0];
+        eprintln!(
+            "Found pending review: {} #{} ({} comments, {})",
+            r.repo, r.pr_number, r.comment_count, r.created_at
+        );
+        eprint!("Open this review? [Y/n] ");
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        let input = input.trim();
+        if !input.is_empty() && !input.eq_ignore_ascii_case("y") {
+            eprintln!("Cancelled.");
+            std::process::exit(0);
+        }
+        return Ok(r.path.to_string_lossy().to_string());
+    }
+
+    // Multiple reviews found
+    eprintln!("Found {} pending reviews:\n", reviews.len());
+    for (i, r) in reviews.iter().enumerate() {
+        eprintln!(
+            "  [{}] {} #{} — {} comments ({})",
+            i + 1,
+            r.repo,
+            r.pr_number,
+            r.comment_count,
+            r.created_at
+        );
+    }
+    eprintln!();
+    eprint!("Select a review [1-{}]: ", reviews.len());
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+    let choice: usize = input
+        .trim()
+        .parse()
+        .ok()
+        .filter(|&n| n >= 1 && n <= reviews.len())
+        .unwrap_or_else(|| {
+            eprintln!("Invalid selection.");
+            std::process::exit(1);
+        });
+
+    Ok(reviews[choice - 1].path.to_string_lossy().to_string())
+}
+
+/// Run the app in standalone pending-review mode (from a saved dry-run file)
+async fn run_with_pending_review(file_path: &str) -> Result<()> {
+    use octorus::ai::pending_review::read_pending_review;
+    use std::path::Path;
+
+    let pending = read_pending_review(Path::new(file_path))?;
+    let repo = pending.repo.clone();
+    let pr_number = pending.pr_number;
+
+    let config = config::Config::load()?;
+
+    // Create app with new_loading so PR data (files/patches) is fetched in
+    // background — this powers the code-context display in the detail modal.
+    let (mut app, tx) = app::App::new_loading(&repo, pr_number, config);
+
+    // Transition directly to PendingReviewEdit state
+    app.pending_review = Some(pending);
+    app.pending_review_edit = Some(app::PendingReviewEditState {
+        selected_comment: 0,
+        deleted_comments: std::collections::HashSet::new(),
+        edited_bodies: std::collections::HashMap::new(),
+        scroll_offset: 0,
+        posting: false,
+        post_result: None,
+        showing_detail: false,
+    });
+    app.state = app::AppState::PendingReviewEdit;
+    app.set_standalone_pending_review(true);
+
+    // Cancellation token for graceful shutdown
+    let cancel_token = CancellationToken::new();
+    let token_clone = cancel_token.clone();
+
+    // Fetch PR data in background (for code context in detail modal)
+    let repo_clone = repo.clone();
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = token_clone.cancelled() => {}
+            _ = loader::fetch_pr_data(repo_clone, pr_number, loader::FetchMode::Fresh, tx) => {}
+        }
+    });
+
+    let result = app.run().await;
+    cancel_token.cancel();
+
+    if result.is_err() {
+        restore_terminal();
+    }
+
     let exit_code = if result.is_ok() { 0 } else { 1 };
     std::process::exit(exit_code);
 }
