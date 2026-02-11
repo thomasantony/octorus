@@ -9,6 +9,8 @@ use ratatui::{
 use crate::ai::adapter::CommentSeverity;
 use crate::ai::pending_review::PendingReview;
 use crate::app::{App, PendingReviewEditState};
+use crate::diff::{classify_line, LineType};
+use crate::github::ChangedFile;
 
 pub fn render(frame: &mut Frame, app: &mut App) {
     let (Some(pending), Some(edit_state)) = (&app.pending_review, &app.pending_review_edit) else {
@@ -224,7 +226,8 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 
     // Render detail modal on top if showing
     if edit_state.showing_detail {
-        render_comment_detail_modal(frame, pending, edit_state);
+        let files = app.files();
+        render_comment_detail_modal(frame, pending, edit_state, files);
     }
 }
 
@@ -232,6 +235,7 @@ fn render_comment_detail_modal(
     frame: &mut Frame,
     pending: &PendingReview,
     edit_state: &PendingReviewEditState,
+    files: &[ChangedFile],
 ) {
     let Some(comment) = pending.review.comments.get(edit_state.selected_comment) else {
         return;
@@ -297,8 +301,54 @@ fn render_comment_detail_modal(
                 Span::raw("")
             },
         ]),
-        Line::from(""),
     ];
+
+    // Code context from the diff
+    let code_lines = extract_code_context(files, &comment.path, comment.line, 3);
+    if !code_lines.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Code:",
+            Style::default()
+                .fg(Color::Gray)
+                .add_modifier(Modifier::BOLD),
+        )));
+
+        for (line_num, content, line_type) in &code_lines {
+            let (prefix, prefix_color) = match line_type {
+                LineType::Added => ("+", Color::Green),
+                LineType::Removed => ("-", Color::Red),
+                _ => (" ", Color::DarkGray),
+            };
+
+            let is_target = *line_num == Some(comment.line);
+            let num_str = line_num
+                .map(|n| format!("{:>4}", n))
+                .unwrap_or_else(|| "    ".to_string());
+
+            let bg = if is_target {
+                Style::default().bg(Color::DarkGray)
+            } else {
+                Style::default()
+            };
+
+            let marker = if is_target { ">" } else { " " };
+
+            lines.push(Line::styled(
+                format!("{} {} {} {}", marker, num_str, prefix, content),
+                bg.fg(prefix_color),
+            ));
+        }
+    }
+
+    // Comment body
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Comment:",
+        Style::default()
+            .fg(Color::Gray)
+            .add_modifier(Modifier::BOLD),
+    )));
 
     for text_line in body.lines() {
         lines.push(Line::from(Span::styled(
@@ -324,6 +374,86 @@ fn render_comment_detail_modal(
         );
 
     frame.render_widget(content, modal_area);
+}
+
+/// Extract code lines around a target new-file line number from the patch.
+/// Returns Vec of (new_line_number, content, line_type) for display.
+fn extract_code_context(
+    files: &[ChangedFile],
+    path: &str,
+    target_line: u32,
+    context_lines: u32,
+) -> Vec<(Option<u32>, String, LineType)> {
+    // Find the file's patch
+    let patch = files
+        .iter()
+        .find(|f| f.filename == path)
+        .and_then(|f| f.patch.as_deref());
+
+    let Some(patch) = patch else {
+        return Vec::new();
+    };
+
+    // First pass: build (new_line_number, content, line_type) for every line
+    let mut all_lines: Vec<(Option<u32>, String, LineType)> = Vec::new();
+    let mut new_line_number: Option<u32> = None;
+
+    for raw_line in patch.lines() {
+        let (line_type, content) = classify_line(raw_line);
+
+        if line_type == LineType::Header {
+            // Parse the hunk header for the starting new line number
+            if let Some(start) = parse_hunk_start(raw_line) {
+                new_line_number = Some(start);
+            }
+            all_lines.push((None, raw_line.to_string(), line_type));
+            continue;
+        }
+
+        if matches!(line_type, LineType::Meta) {
+            continue;
+        }
+
+        let current = match line_type {
+            LineType::Removed => None,
+            _ => new_line_number,
+        };
+
+        all_lines.push((current, content.to_string(), line_type));
+
+        if matches!(line_type, LineType::Added | LineType::Context) {
+            if let Some(n) = new_line_number {
+                new_line_number = Some(n + 1);
+            }
+        }
+    }
+
+    // Find the index of the target line
+    let target_idx = all_lines
+        .iter()
+        .position(|(n, _, _)| *n == Some(target_line));
+
+    let Some(idx) = target_idx else {
+        return Vec::new();
+    };
+
+    let start = idx.saturating_sub(context_lines as usize);
+    let end = (idx + context_lines as usize + 1).min(all_lines.len());
+
+    // Skip any hunk headers at the start of the window
+    all_lines[start..end]
+        .iter()
+        .filter(|(_, _, lt)| !matches!(lt, LineType::Header))
+        .cloned()
+        .collect()
+}
+
+/// Parse `@@ ... +new_start,count @@` to extract new_start.
+fn parse_hunk_start(line: &str) -> Option<u32> {
+    let plus_pos = line.find('+')?;
+    let after_plus = &line[plus_pos + 1..];
+    let end_pos = after_plus.find([',', ' ']).unwrap_or(after_plus.len());
+    after_plus[..end_pos].parse().ok()
 }
 
 fn truncate(s: &str, max_chars: usize) -> String {
