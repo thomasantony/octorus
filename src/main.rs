@@ -339,6 +339,8 @@ async fn run_with_pending_review(file_path: &str) -> Result<()> {
         post_result: None,
         showing_detail: false,
         showing_summary: false,
+        include_header: true,
+        post_summary: true,
     });
     app.state = app::AppState::PendingReviewEdit;
     app.set_standalone_pending_review(true);

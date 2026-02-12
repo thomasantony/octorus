@@ -7,6 +7,23 @@ use super::orchestrator::RallyEvent;
 use crate::github;
 use tokio::sync::mpsc;
 
+/// Options controlling how a review is posted to GitHub.
+pub struct PostOptions {
+    /// Whether to include the "[AI Rally - Reviewer]" header prefix on comments
+    pub include_header: bool,
+    /// Whether to post the summary review via submit_review()
+    pub post_summary: bool,
+}
+
+impl Default for PostOptions {
+    fn default() -> Self {
+        Self {
+            include_header: true,
+            post_summary: true,
+        }
+    }
+}
+
 /// Post a reviewer's output to GitHub as a PR review with inline comments.
 ///
 /// This is the shared posting logic used by both the Orchestrator (live mode)
@@ -17,49 +34,61 @@ pub async fn post_review_to_github(
     head_sha: &str,
     review: &ReviewerOutput,
     event_sink: Option<&mpsc::Sender<RallyEvent>>,
+    options: &PostOptions,
 ) -> Result<()> {
-    let app_action = match review.action {
-        ReviewAction::Approve => crate::app::ReviewAction::Approve,
-        ReviewAction::RequestChanges => crate::app::ReviewAction::RequestChanges,
-        ReviewAction::Comment => crate::app::ReviewAction::Comment,
-    };
+    if options.post_summary {
+        let app_action = match review.action {
+            ReviewAction::Approve => crate::app::ReviewAction::Approve,
+            ReviewAction::RequestChanges => crate::app::ReviewAction::RequestChanges,
+            ReviewAction::Comment => crate::app::ReviewAction::Comment,
+        };
 
-    let app_action_for_fallback = app_action;
+        let app_action_for_fallback = app_action;
 
-    let summary_with_prefix = format!("[AI Rally - Reviewer]\n\n{}", review.summary);
+        let summary_body = if options.include_header {
+            format!("[AI Rally - Reviewer]\n\n{}", review.summary)
+        } else {
+            review.summary.clone()
+        };
 
-    let result =
-        github::submit_review(repo, pr_number, app_action, &summary_with_prefix).await;
+        let result = github::submit_review(repo, pr_number, app_action, &summary_body).await;
 
-    if result.is_err() && matches!(app_action_for_fallback, crate::app::ReviewAction::Approve) {
-        warn!("Approve failed, falling back to comment");
-        if let Some(sink) = event_sink {
-            let _ = sink
-                .send(RallyEvent::Log(
-                    "Approve failed, falling back to comment".to_string(),
-                ))
-                .await;
+        if result.is_err()
+            && matches!(app_action_for_fallback, crate::app::ReviewAction::Approve)
+        {
+            warn!("Approve failed, falling back to comment");
+            if let Some(sink) = event_sink {
+                let _ = sink
+                    .send(RallyEvent::Log(
+                        "Approve failed, falling back to comment".to_string(),
+                    ))
+                    .await;
+            }
+            github::submit_review(
+                repo,
+                pr_number,
+                crate::app::ReviewAction::Comment,
+                &summary_body,
+            )
+            .await?;
+        } else {
+            result?;
         }
-        github::submit_review(
-            repo,
-            pr_number,
-            crate::app::ReviewAction::Comment,
-            &summary_with_prefix,
-        )
-        .await?;
-    } else {
-        result?;
     }
 
     for comment in &review.comments {
-        let body_with_prefix = format!("[AI Rally - Reviewer]\n\n{}", comment.body);
+        let body = if options.include_header {
+            format!("[AI Rally - Reviewer]\n\n{}", comment.body)
+        } else {
+            comment.body.clone()
+        };
         if let Err(e) = github::create_review_comment(
             repo,
             pr_number,
             head_sha,
             &comment.path,
             comment.line,
-            &body_with_prefix,
+            &body,
         )
         .await
         {

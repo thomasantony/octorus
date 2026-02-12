@@ -838,6 +838,7 @@ impl Orchestrator {
             &context.head_sha,
             review,
             Some(&self.event_sender),
+            &super::poster::PostOptions::default(),
         )
         .await
     }

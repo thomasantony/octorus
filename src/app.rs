@@ -257,6 +257,10 @@ pub struct PendingReviewEditState {
     pub showing_detail: bool,
     /// Whether the summary modal is visible
     pub showing_summary: bool,
+    /// Whether to include "[AI Rally - Reviewer]" header prefix on posted comments
+    pub include_header: bool,
+    /// Whether to post the summary review (submit_review call)
+    pub post_summary: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1130,6 +1134,8 @@ impl App {
                             post_result: None,
                             showing_detail: false,
                             showing_summary: false,
+                            include_header: true,
+                            post_summary: true,
                         });
                         // Only transition if there are comments to review
                         if num_comments > 0 {
@@ -2234,6 +2240,20 @@ impl App {
                     }
                 }
             }
+            KeyCode::Char('H') => {
+                if let Some(ref mut edit_state) = self.pending_review_edit {
+                    if !edit_state.posting && edit_state.post_result.is_none() {
+                        edit_state.include_header = !edit_state.include_header;
+                    }
+                }
+            }
+            KeyCode::Char('S') => {
+                if let Some(ref mut edit_state) = self.pending_review_edit {
+                    if !edit_state.posting && edit_state.post_result.is_none() {
+                        edit_state.post_summary = !edit_state.post_summary;
+                    }
+                }
+            }
             KeyCode::Char('p') => {
                 if let Some(ref edit_state) = self.pending_review_edit {
                     if !edit_state.posting && edit_state.post_result.is_none() {
@@ -2259,6 +2279,10 @@ impl App {
                             let repo = pending.repo.clone();
                             let pr_number = pending.pr_number;
                             let head_sha = pending.head_sha.clone();
+                            let post_options = crate::ai::poster::PostOptions {
+                                include_header: edit_state.include_header,
+                                post_summary: edit_state.post_summary,
+                            };
 
                             // Mark as posting
                             if let Some(ref mut edit_state) = self.pending_review_edit {
@@ -2275,6 +2299,7 @@ impl App {
                                         &head_sha,
                                         &final_review,
                                         None,
+                                        &post_options,
                                     )
                                     .await;
                                 let _ = tx

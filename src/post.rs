@@ -24,6 +24,7 @@ pub async fn run_post(file_path: &str) -> Result<()> {
         &pending.head_sha,
         &pending.review,
         None,
+        &octorus::ai::poster::PostOptions::default(),
     )
     .await?;
 

@@ -22,7 +22,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(5), // Header
+            Constraint::Length(6), // Header
             Constraint::Min(10),  // Comment list
             Constraint::Length(3), // Status bar
         ])
@@ -33,6 +33,9 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     let total_comments = pending.review.comments.len();
     let deleted_count = edit_state.deleted_comments.len();
     let edited_count = edit_state.edited_bodies.len();
+
+    let header_check = if edit_state.include_header { "x" } else { " " };
+    let summary_check = if edit_state.post_summary { "x" } else { " " };
 
     let header_lines = vec![
         Line::from(vec![
@@ -51,6 +54,13 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         Line::from(vec![
             Span::styled("Summary: ", Style::default().fg(Color::Gray)),
             Span::styled(truncate(&pending.review.summary, 80), Style::default().fg(Color::White)),
+        ]),
+        Line::from(vec![
+            Span::styled("Options: ", Style::default().fg(Color::Gray)),
+            Span::styled(format!("[{}] Header", header_check), Style::default().fg(if edit_state.include_header { Color::Green } else { Color::DarkGray })),
+            Span::raw("  "),
+            Span::styled(format!("[{}] Summary", summary_check), Style::default().fg(if edit_state.post_summary { Color::Green } else { Color::DarkGray })),
+            Span::styled("    (H/S to toggle)", Style::default().fg(Color::DarkGray)),
         ]),
     ];
 
@@ -244,7 +254,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     } else if edit_state.post_result.is_some() {
         "q: Close"
     } else {
-        "j/k: Navigate | Enter: View | s: Summary | d: Delete | e: Edit | p: Post | q: Cancel"
+        "j/k: Navigate | Enter: View | s: Summary | d: Del | e: Edit | H: Header | S: Summary post | p: Post | q: Cancel"
     };
 
     let status_bar = Paragraph::new(Line::from(vec![Span::styled(
